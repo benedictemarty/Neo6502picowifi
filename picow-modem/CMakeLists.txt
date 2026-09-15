@@ -30,6 +30,7 @@ target_link_libraries(picow_modem
     hardware_uart
     hardware_flash
     hardware_watchdog
+    pico_bootrom
     tinyusb_device
     tinyusb_board
 )

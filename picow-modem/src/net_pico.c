@@ -17,6 +17,7 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "hardware/watchdog.h"
+#include "pico/bootrom.h"
 #include "lwip/dns.h"
 #include "lwip/tcp.h"
 #include "lwip/icmp.h"
@@ -123,7 +124,14 @@ static bool wifi_connected(void *ctx)
     return cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP;
 }
 
-struct scan_ctx { at_scan_cb cb; void *cb_ctx; };
+/* Un SSID diffusé par plusieurs points d'accès n'est listé qu'une fois
+   (meilleur RSSI), sinon netsetup (MAX_NETWORKS) se remplit de doublons. */
+#define SCAN_MAX 24
+struct scan_ctx {
+    at_scan_cb cb; void *cb_ctx;
+    int n;
+    struct { char ssid[33]; int ecn, rssi; } ap[SCAN_MAX];
+};
 
 static int scan_result(void *env, const cyw43_ev_scan_result_t *r)
 {
@@ -139,19 +147,38 @@ static int scan_result(void *env, const cyw43_ev_scan_result_t *r)
     else if (r->auth_mode & 4) ecn = 3;
     else if (r->auth_mode & 2) ecn = 2;
     else if (r->auth_mode & 1) ecn = 1;
-    s->cb(s->cb_ctx, ecn, ssid, r->rssi);
+    for (int i = 0; i < s->n; i++) {
+        if (!strcmp(s->ap[i].ssid, ssid)) {
+            if (r->rssi > s->ap[i].rssi) s->ap[i].rssi = r->rssi;
+            return 0;
+        }
+    }
+    if (s->n < SCAN_MAX) {
+        strcpy(s->ap[s->n].ssid, ssid);
+        s->ap[s->n].ecn = ecn;
+        s->ap[s->n].rssi = r->rssi;
+        s->n++;
+    }
     return 0;
 }
 
 static int wifi_scan(void *ctx, at_scan_cb cb, void *cb_ctx)
 {
     (void)ctx;
-    struct scan_ctx s = { cb, cb_ctx };
+    static struct scan_ctx s;
+    memset(&s, 0, sizeof s);
+    s.cb = cb; s.cb_ctx = cb_ctx;
     cyw43_wifi_scan_options_t opts = { 0 };
     if (cyw43_wifi_scan(&cyw43_state, &opts, &s, scan_result) != 0) return AT_NET_FAIL;
     uint32_t t0 = to_ms_since_boot(get_absolute_time());
     while (cyw43_wifi_scan_active(&cyw43_state) && to_ms_since_boot(get_absolute_time()) - t0 < 15000)
         sleep_ms(50);
+    /* tri par RSSI décroissant (comme AT+CWLAPOPT=1,…) */
+    for (int i = 1; i < s.n; i++)
+        for (int j = i; j > 0 && s.ap[j].rssi > s.ap[j - 1].rssi; j--) {
+            typeof(s.ap[0]) t = s.ap[j]; s.ap[j] = s.ap[j - 1]; s.ap[j - 1] = t;
+        }
+    for (int i = 0; i < s.n; i++) cb(cb_ctx, s.ap[i].ecn, s.ap[i].ssid, s.ap[i].rssi);
     return AT_NET_OK;
 }
 
@@ -438,6 +465,13 @@ static void reset_op(void *ctx)
     while (1) tight_loop_contents();
 }
 
+static void bootsel_op(void *ctx)
+{
+    (void)ctx;
+    sleep_ms(50);
+    reset_usb_boot(0, 0);
+}
+
 static const char *version_op(void *ctx) { (void)ctx; return PICOW_MODEM_VERSION; }
 
 /* ------------------------------------------------------------- init */
@@ -450,7 +484,7 @@ struct at_modem_ops net_pico_ops = {
     .tcp_connect = tcp_connect_op, .tcp_send = tcp_send_op, .tcp_close = tcp_close_op,
     .tcp_connected = tcp_connected_op, .tcp_listen = tcp_listen_op, .tcp_accept = tcp_accept_op,
     .config_save = config_flash_save, .sntp_time = sntp_time_op, .ping = ping_op,
-    .reset = reset_op, .version = version_op,
+    .reset = reset_op, .bootsel = bootsel_op, .version = version_op,
 };
 
 bool net_pico_init(struct at_modem *m)

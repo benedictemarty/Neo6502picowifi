@@ -48,11 +48,13 @@ static void msave(void *c, const struct at_config *cfg) { (void)c; M.saved++; M.
 static void msntp(void *c, char *o, size_t n) { (void)c; snprintf(o, n, "Tue Sep 15 12:00:00 2026"); }
 static int mping(void *c, const char *h) { (void)c; return strcmp(h, "nowhere") ? 12 : -1; }
 static void mreset(void *c) { (void)c; M.resets++; }
+static int bootsels;
+static void mbootsel(void *c) { (void)c; bootsels++; }
 static const char *mver(void *c) { (void)c; return "0.1.0"; }
 
 static const struct at_modem_ops ops = {
     NULL, mw, mms, mjoin, mleave, mwifi, mscan, minfo, mconn, msend, mclose, mtcp,
-    mlisten, maccept, msave, msntp, mping, mreset, mver,
+    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver,
 };
 
 static struct at_modem modem;
@@ -193,7 +195,8 @@ static void test_netsetup_join_scan(void)
     send("AT+CWMODE=2\r\n"); CHECK_OUT("ERROR"); clear_out(); /* pas de point d'accès */
     send("AT+CIUPDATE\r\n"); CHECK_OUT("ERROR"); clear_out();
     send("AT+RST\r\n"); CHECK_OUT("OK"); CHECK(M.resets == 1); clear_out();
-    send("AT+RESTORE\r\n"); CHECK(M.resets == 2 && M.saved_cfg.ssid[0] == 0);
+    send("AT+RESTORE\r\n"); CHECK(M.resets == 2 && M.saved_cfg.ssid[0] == 0); clear_out();
+    send("AT+BOOTSEL\r\n"); CHECK_OUT("OK"); CHECK(bootsels == 1);
 }
 
 static void test_prophet_http(void)

@@ -317,6 +317,10 @@ static void plus_command(struct at_modem *m, const char *cmd)
     } else if (!strcmp(cmd, "RST")) {
         ok(m);
         m->ops->reset(m->ops->ctx);
+    } else if (!strcmp(cmd, "BOOTSEL")) {
+        if (!m->ops->bootsel) { error(m); return; }
+        ok(m);
+        m->ops->bootsel(m->ops->ctx);
     } else if (!strcmp(cmd, "RESTORE")) {
         at_modem_config_defaults(&m->cfg);
         save(m);

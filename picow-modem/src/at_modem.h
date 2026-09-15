@@ -99,6 +99,7 @@ struct at_modem_ops {
     void (*sntp_time)(void *ctx, char *out, size_t out_len); /* "" si inconnu */
     int  (*ping)(void *ctx, const char *host);               /* ms ou <0     */
     void (*reset)(void *ctx);
+    void (*bootsel)(void *ctx);   /* AT+BOOTSEL : mode UF2 (NULL = non supporté) */
     const char *(*version)(void *ctx);
 };
 
