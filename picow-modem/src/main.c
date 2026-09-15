@@ -114,11 +114,9 @@ int main(void)
         uart_write_blocking(UART_ID, (const uint8_t *)msg, sizeof msg - 1);
     }
 
-    /* comme l'ESP8266 : rejoint le dernier réseau enregistré au démarrage */
-    int boot_join = -1;
-    if (wifi_ok && modem.cfg.ssid[0])
-        boot_join = net_pico_ops.wifi_join(NULL, modem.cfg.ssid, modem.cfg.pass);
-    (void)boot_join;
+    /* comme l'ESP8266 : rejoint le dernier réseau enregistré, en tâche de fond
+       (tentatives répétées, commandes AT disponibles tout de suite) */
+    if (wifi_ok && modem.cfg.ssid[0]) net_pico_background_join(true);
     if (wifi_ok && modem.cfg.listen_port)
         net_pico_ops.tcp_listen(NULL, modem.cfg.listen_port);
     if (watchdog_caused_reboot() && watchdog_hw->scratch[6] == 0x4C574950)

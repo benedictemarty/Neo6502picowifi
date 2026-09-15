@@ -147,10 +147,43 @@ static void apply_ip_config(void)
     apply_sntp_config();
 }
 
+/* Reconnexion de fond (comme l'ESP8266) : tant que le SSID mémorisé n'est pas
+   associé, une tentative asynchrone toutes les BG_RETRY_MS, sans bloquer les
+   commandes AT ; l'IP/DNS/SNTP sont appliqués quand le lien monte. */
+#define BG_RETRY_MS 15000
+static bool bg_enabled, bg_was_up;
+static uint32_t bg_last_try;
+
+static uint32_t auth_for(const char *pass) { return pass[0] ? CYW43_AUTH_WPA2_MIXED_PSK : CYW43_AUTH_OPEN; }
+
+void net_pico_background_join(bool enable)
+{
+    bg_enabled = enable;
+    bg_last_try = to_ms_since_boot(get_absolute_time()) - BG_RETRY_MS; /* première tentative immédiate */
+}
+
+static void bg_poll(void)
+{
+    if (!bg_enabled || !modem->cfg.ssid[0]) return;
+    int st = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
+    if (st == CYW43_LINK_UP) {
+        if (!bg_was_up) { memcpy(joined_ssid, modem->cfg.ssid, sizeof joined_ssid); apply_ip_config(); }
+        bg_was_up = true;
+        return;
+    }
+    bg_was_up = false;
+    if (st == CYW43_LINK_JOIN || st == CYW43_LINK_NOIP) return;      /* en cours */
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (now - bg_last_try < BG_RETRY_MS) return;
+    bg_last_try = now;
+    cyw43_arch_wifi_connect_async(modem->cfg.ssid, modem->cfg.pass[0] ? modem->cfg.pass : NULL, auth_for(modem->cfg.pass));
+}
+
 static int wifi_join(void *ctx, const char *ssid, const char *pass)
 {
     (void)ctx;
-    uint32_t auth = pass[0] ? CYW43_AUTH_WPA2_MIXED_PSK : CYW43_AUTH_OPEN;
+    uint32_t auth = auth_for(pass);
+    bg_enabled = false;                      /* pas de tentative concurrente pendant la commande */
     if (cyw43_arch_wifi_connect_async(ssid, pass[0] ? pass : NULL, auth) != 0) return AT_NET_FAIL;
     uint32_t t0 = to_ms_since_boot(get_absolute_time());
     bool seen_nonet = false;
@@ -159,6 +192,8 @@ static int wifi_join(void *ctx, const char *ssid, const char *pass)
         if (st == CYW43_LINK_UP) {
             strncpy(joined_ssid, ssid, AT_SSID_MAX);
             apply_ip_config();
+            bg_was_up = true;
+            net_pico_background_join(true);  /* reconnexion automatique si le lien tombe */
             return AT_NET_OK;
         }
         if (st == CYW43_LINK_BADAUTH) return AT_NET_BAD_PASSWORD;
@@ -177,6 +212,7 @@ static int wifi_join(void *ctx, const char *ssid, const char *pass)
 static void wifi_leave(void *ctx)
 {
     (void)ctx;
+    bg_enabled = false;
     cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
     joined_ssid[0] = 0;
 }
@@ -774,6 +810,7 @@ bool net_pico_init(struct at_modem *m)
 
 void net_pico_poll(void)
 {
+    bg_poll();
     /* sonnerie répétée tant que l'appel entrant n'est pas décroché */
     if (pending_pcb && to_ms_since_boot(get_absolute_time()) - last_ring_ms >= RING_PERIOD_MS) {
         last_ring_ms = to_ms_since_boot(get_absolute_time());

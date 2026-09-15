@@ -21,7 +21,8 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
     utilisable **dès maintenant** (câblage dans `hardware/PICOW_UEXT.md`).
 - Configuration persistante (dernier secteur de flash) : SSID/mot de passe
   (`AT+CWJAP_DEF`), écho, DHCP/IP statique, DNS, SNTP, port d'écoute, S0.
-  Au démarrage le Pico W rejoint le dernier réseau enregistré, comme l'ESP.
+  Le Pico W rejoint le dernier réseau enregistré en tâche de fond (au boot et
+  après une coupure : nouvelle tentative toutes les 15 s), comme l'ESP.
 - **TLS terminé sur le Pico W** (mbedTLS 3.6, TLS 1.2 client) : `AT+CIPSTART="SSL",…`
   ou, pour les clients non modifiables comme `prophet.neo`, `AT+TLSPORT=443` qui
   rend TLS toute connexion `"TCP"` vers ce port. Certificat **toujours vérifié**
@@ -118,9 +119,12 @@ make test          # firmware/picow-modem/tests : cœur du modem + dates TLS sur
 `tests/test_at_modem.c` rejoue les séquences exactes de netinfo, netsetup,
 prophet (`CIPSTART` → `CIPSEND` → `+IPD` → `CLOSED`) et du modem Hayes.
 
-Test sur carte : `screen /dev/ttyACM0` (ou `minicom`) puis `AT`, `AT+CWLAP`,
-`AT+CWJAP_DEF="ssid","pass"`, `AT+CIPSTART="TCP","mimuma.pl",8998`… ;
-résultats à consigner dans `docs/SPRINTS.md`.
+Validation sur carte, automatisée : `python3 validation/validate.py`
+(protocole `validation/PROTOCOLE.md`, rapports `validation/RAPPORT-*.md`) —
+55 étapes : identité, Wi-Fi, SNTP, séquence Prophet en clair et en TLS,
+refus TLS (racine inconnue, nom faux, expiré, IP), Hayes, appel entrant.
+Prérequis : Wi-Fi provisionné une fois avec `screen /dev/ttyACM0 115200` et
+`AT+CWJAP_DEF="ssid","pass"`.
 
 ## Structure
 
@@ -133,4 +137,5 @@ certs/roots.pem       racines de confiance embarquées ; tools/pem2c.py les comp
 src/main.c            transports USB CDC + UART0, boucle principale, LED
 src/usb_descriptors.c, tusb_config.h, lwipopts.h
 tests/                tests unitaires PC
+validation/           protocole, script et rapports de validation sur carte
 ```
