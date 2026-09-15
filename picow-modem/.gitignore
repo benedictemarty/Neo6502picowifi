@@ -1,2 +1,3 @@
 build/
 tests/test_at_modem
+tests/test_tls_date

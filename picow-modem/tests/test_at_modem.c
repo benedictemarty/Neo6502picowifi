@@ -18,6 +18,7 @@ static struct {
     bool wifi_up, tcp_up, listen_pending;
     int  join_result, connect_result;
     char last_ssid[64], last_pass[64], last_host[64];
+    bool last_tls, no_tls, no_time;
     uint16_t last_port, listen_port;
     uint8_t sent[4096];
     size_t sent_len;
@@ -38,7 +39,12 @@ static void minfo(void *c, struct at_ip_info *i) {
     strcpy(i->dns, "192.168.1.1"); strcpy(i->mac, "28:cd:c1:00:11:22"); strcpy(i->bssid, "aa:bb:cc:dd:ee:ff"); strcpy(i->ssid, "Livebox-1234");
     i->channel = 6; i->rssi = -55; i->dhcp = true;
 }
-static int mconn(void *c, const char *h, uint16_t p) { (void)c; strcpy(M.last_host, h); M.last_port = p; M.tcp_up = (M.connect_result == AT_NET_OK); return M.connect_result; }
+static int mconn(void *c, const char *h, uint16_t p, bool tls) {
+    (void)c; strcpy(M.last_host, h); M.last_port = p; M.last_tls = tls;
+    if (tls && M.no_tls) return AT_NET_NO_TLS;
+    if (tls && M.no_time) return AT_NET_NO_TIME;
+    M.tcp_up = (M.connect_result == AT_NET_OK); return M.connect_result; }
+static const char *mtls(void *c) { (void)c; return M.no_tls ? NULL : "TLS: test 1.2, root: Test Root, time: synced"; }
 static int msend(void *c, const uint8_t *d, size_t n) { (void)c; memcpy(M.sent + M.sent_len, d, n); M.sent_len += n; return AT_NET_OK; }
 static void mclose(void *c) { (void)c; M.tcp_up = false; }
 static bool mtcp(void *c) { (void)c; return M.tcp_up; }
@@ -54,7 +60,7 @@ static const char *mver(void *c) { (void)c; return "0.1.0"; }
 
 static const struct at_modem_ops ops = {
     NULL, mw, mms, mjoin, mleave, mwifi, mscan, minfo, mconn, msend, mclose, mtcp,
-    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL,
+    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL, mtls, NULL,
 };
 
 static struct at_modem modem;
@@ -134,7 +140,7 @@ static void test_netinfo_sequence(void)
     CHECK_OUT("+CWDHCP_DEF:3\r\n");    /* bit 1 = DHCP station actif */
     clear_out();
     send("AT+CIPSSLCCONF?\r\n");
-    CHECK_OUT("+CIPSSLCCONF:0\r\n");
+    CHECK_OUT("+CIPSSLCCONF:2\r\n");   /* CA toujours vérifiée */
     clear_out();
     send("AT+CIPSNTPCFG?\r\n");
     CHECK_OUT("+CIPSNTPCFG:0,0,\"pool.ntp.org\"\r\n");
@@ -405,6 +411,60 @@ static void test_hayes(void)
     send("AT+PING=\"nowhere\"\r\n"); CHECK_OUT("ERROR"); clear_out();
 }
 
+static void test_tls(void)
+{
+    reset_mock();
+    M.wifi_up = true;
+    send("ATE0\r\n"); clear_out();
+    /* netsetup : AT+CIPSSLCCONF=2 accepté, =1/=3 (cert client) refusés, =0 toléré */
+    send("AT+CIPSSLCCONF=2\r\n"); CHECK_OUT("OK"); clear_out();
+    send("AT+CIPSSLCCONF=0\r\n"); CHECK_OUT("OK"); clear_out();
+    send("AT+CIPSSLCCONF=1\r\n"); CHECK_OUT("ERROR"); clear_out();
+    /* CIPSTART "TCP" ordinaire : pas de TLS */
+    send("AT+CIPSTART=\"TCP\",\"mimuma.pl\",8998\r\n");
+    CHECK(!M.last_tls); CHECK_OUT("CONNECT"); clear_out();
+    send("AT+CIPCLOSE\r\n"); clear_out();
+    /* CIPSTART "SSL" explicite */
+    send("AT+CIPSTART=\"SSL\",\"prophet.example.org\",443\r\n");
+    CHECK(M.last_tls && M.last_port == 443); CHECK_OUT("CONNECT"); clear_out();
+    send("AT+CIPCLOSE\r\n"); clear_out();
+    /* AT+TLSPORT : "TCP" vers un port listé → TLS (prophet.neo non modifié, set port 443) */
+    send("AT+TLSPORT?\r\n"); CHECK_OUT("+TLSPORT:\r\n"); clear_out();
+    send("AT+TLSPORT=443,8443\r\n"); CHECK_OUT("OK");
+    CHECK(M.saved_cfg.tls_ports[0] == 443 && M.saved_cfg.tls_ports[1] == 8443 && M.saved_cfg.tls_ports[2] == 0);
+    clear_out();
+    send("AT+TLSPORT?\r\n"); CHECK_OUT("+TLSPORT:443,8443\r\n"); clear_out();
+    send("AT+CIPSTART=\"TCP\",\"prophet.example.org\",443\r\n");
+    CHECK(M.last_tls); CHECK_OUT("CONNECT"); clear_out();
+    send("AT+CIPCLOSE\r\n"); clear_out();
+    send("AT+CIPSTART=\"TCP\",\"prophet.example.org\",80\r\n");
+    CHECK(!M.last_tls); clear_out();
+    send("AT+CIPCLOSE\r\n"); clear_out();
+    /* ATDT vers un port listé → TLS aussi */
+    send("ATDT prophet.example.org:8443\r\n"); CHECK(M.last_tls); CHECK_OUT("CONNECT");
+    M.ms += 2000; send("+++"); M.ms += 1100; at_modem_poll(&modem); clear_out();
+    send("ATH\r\n"); clear_out();
+    /* ATI liste les ports TLS */
+    send("ATI\r\n"); CHECK_OUT("TLS: test 1.2"); CHECK_OUT("TLS ports: 443 8443\r\n"); clear_out();
+    /* trop de ports / valeur invalide */
+    send("AT+TLSPORT=1,2,3,4,5\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+TLSPORT=70000\r\n"); CHECK_OUT("ERROR"); clear_out();
+    /* effacement */
+    send("AT+TLSPORT=0\r\n"); CHECK_OUT("OK"); CHECK(M.saved_cfg.tls_ports[0] == 0); clear_out();
+    /* refus sans heure SNTP, échec de handshake */
+    M.no_time = true;
+    send("AT+CIPSTART=\"SSL\",\"prophet.example.org\",443\r\n");
+    CHECK_OUT("no time (SNTP) for TLS"); CHECK_OUT("ERROR"); CHECK_NOT_OUT("CONNECT"); clear_out();
+    M.no_time = false; M.connect_result = AT_NET_TLS_FAIL;
+    send("AT+CIPSTART=\"SSL\",\"prophet.example.org\",443\r\n");
+    CHECK_OUT("TLS handshake failed"); CHECK_OUT("ERROR"); clear_out();
+    M.connect_result = AT_NET_OK;
+    /* plateforme sans TLS : "SSL" → no TLS, CIPSSLCCONF? → 0 */
+    M.no_tls = true;
+    send("AT+CIPSTART=\"SSL\",\"x\",443\r\n"); CHECK_OUT("no TLS"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+CIPSSLCCONF=2\r\n"); CHECK_OUT("ERROR"); clear_out();
+}
+
 static void test_config_persist(void)
 {
     struct at_config cfg;
@@ -416,6 +476,10 @@ static void test_config_persist(void)
     CHECK(!strcmp(modem.cfg.ssid, "Reseau") && modem.cfg.echo == 0);
     send("AT\r\n");
     CHECK(!strcmp(M.out, "\r\nOK\r\n"));   /* pas d'écho */
+    cfg.magic = AT_CONFIG_MAGIC_V1;           /* flash v1 : identifiants conservés, tls_ports à zéro */
+    cfg.tls_ports[0] = 443;
+    at_modem_init(&modem, &ops, &cfg);
+    CHECK(!strcmp(modem.cfg.ssid, "Reseau") && modem.cfg.tls_ports[0] == 0 && modem.cfg.magic == AT_CONFIG_MAGIC);
     cfg.magic = 0;                            /* flash vierge : défauts */
     at_modem_init(&modem, &ops, &cfg);
     CHECK(modem.cfg.ssid[0] == 0 && modem.cfg.echo == 1);
@@ -429,6 +493,7 @@ int main(void)
     test_prophet_http();
     test_rx_ring();
     test_hayes();
+    test_tls();
     test_config_persist();
     printf("%d vérifications, %d échec(s)\n", checks, failures);
     return failures ? 1 : 0;

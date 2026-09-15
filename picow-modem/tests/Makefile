@@ -2,13 +2,17 @@
 CC ?= gcc
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -g -O1 -fsanitize=address,undefined
 
-test: test_at_modem
+test: test_at_modem test_tls_date
 	./test_at_modem
+	./test_tls_date
+
+test_tls_date: test_tls_date.c ../src/tls_date.c ../src/tls_date.h
+	$(CC) $(CFLAGS) -o $@ test_tls_date.c ../src/tls_date.c
 
 test_at_modem: test_at_modem.c ../src/at_modem.c ../src/at_modem.h
 	$(CC) $(CFLAGS) -o $@ test_at_modem.c ../src/at_modem.c
 
 clean:
-	rm -f test_at_modem
+	rm -f test_at_modem test_tls_date
 
 .PHONY: test clean

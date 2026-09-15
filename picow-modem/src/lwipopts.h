@@ -39,6 +39,16 @@
 #define LWIP_TCP_KEEPALIVE          1
 #define LWIP_STATS                  0
 
+/* TLS terminé sur le Pico W : altcp + mbedTLS (mbedtls_config.h) ; mbedTLS
+   alloue sur le tas newlib, pas dans MEM_SIZE. */
+#define LWIP_ALTCP                  1
+#define LWIP_ALTCP_TLS              1
+#define LWIP_ALTCP_TLS_MBEDTLS      1
+/* altcp_tls met VERIFY_OPTIONAL par défaut : un certificat invalide (nom,
+   chaîne, dates) laisserait passer la connexion. Exigé : REQUIRED. */
+#define ALTCP_MBEDTLS_AUTHMODE      MBEDTLS_SSL_VERIFY_REQUIRED
+#define ALTCP_MBEDTLS_USE_SESSION_TICKETS 0   /* côté serveur seulement ; le client réutilise la session via altcp_tls_get/set_session */
+
 /* Le client SNTP (et lwIP lui-même pour TCP/DNS/DHCP) réserve des sys_timeout
    au-delà du compte interne ; sans cette marge, le premier tcp_connect après
    sntp_init() échoue sur « pool MEMP_SYS_TIMEOUT is empty » (vu sur carte). */
@@ -50,7 +60,15 @@
 void net_pico_set_time(unsigned int sec);
 #define SNTP_SET_SYSTEM_TIME(sec)   net_pico_set_time(sec)
 
-#define LWIP_DEBUG                  0
+/* Diagnostic : les messages LWIP_DEBUGF d'altcp_tls (échecs de handshake,
+   code mbedTLS) sont conservés pour ATI (net_pico.c : net_pico_diag). */
+#define LWIP_DEBUG                  1
+#define ALTCP_MBEDTLS_DEBUG         LWIP_DBG_ON
+#define LWIP_DBG_MIN_LEVEL          LWIP_DBG_LEVEL_ALL
+#define LWIP_DBG_TYPES_ON           LWIP_DBG_ON
+void net_pico_diag(const char *fmt, ...);
+#define LWIP_PLATFORM_DIAG(x)       net_pico_diag x
+#define LWIP_PLATFORM_ASSERT_INCLUDE_ONCE 1
 
 /* Une assertion lwIP devient panic() dans le SDK (boucle infinie, puis reset
    par le watchdog) ; on conserve le message pour ATI (net_pico.c). */

@@ -7,19 +7,37 @@
  * (CIPMUX=0) + une écoute entrante (CIPSERVER / ATA).
  */
 #include "net_pico.h"
+#include "tls_date.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 
 #include "pico/cyw43_arch.h"
 #include "pico/stdlib.h"
+#include "pico/time.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "hardware/watchdog.h"
 #include "pico/bootrom.h"
 #include "lwip/dns.h"
 #include "lwip/tcp.h"
+#include "lwip/altcp.h"
+#include "lwip/altcp_tcp.h"
+#include "lwip/altcp_tls.h"
+#include "mbedtls/ssl.h"
+#include "mbedtls/version.h"
+#include "mbedtls/debug.h"
+#include "mbedtls/aes.h"
+#include "mbedtls/gcm.h"
+#include "mbedtls/sha256.h"
+#include "mbedtls/sha512.h"
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/ecp.h"
+#include "mbedtls/bignum.h"
+#include "mbedtls/platform_time.h"
+#include <sys/time.h>
 #include "lwip/icmp.h"
 #include "lwip/raw.h"
 #include "lwip/inet_chksum.h"
@@ -30,14 +48,11 @@
 #endif
 
 #define CONNECT_TIMEOUT_MS 10000
+#define TLS_CONNECT_TIMEOUT_MS 30000
 #define SEND_TIMEOUT_MS    5000
 #define RING_PERIOD_MS     3000
 
 static struct at_modem *modem;
-static struct tcp_pcb *pcb;            /* connexion active                  */
-static struct tcp_pcb *listen_pcb;     /* écoute                            */
-static struct tcp_pcb *pending_pcb;    /* appel entrant non répondu         */
-static volatile int connect_state;     /* 0 en cours, 1 ok, <0 erreur       */
 static volatile bool dns_done;
 static ip_addr_t dns_result;
 static char joined_ssid[AT_SSID_MAX + 1];
@@ -55,6 +70,20 @@ static void apply_sntp_config(void);
    un registre scratch (lu au boot après un reset watchdog, cf. main.c). */
 static void wait_ms(uint32_t ms) { watchdog_update(); sleep_ms(ms); }
 void net_pico_stage(uint32_t stage) { watchdog_hw->scratch[4] = stage; }
+
+/* Derniers messages de diagnostic lwIP (LWIP_PLATFORM_DIAG), pour ATI. */
+static char diag_buf[6][80];
+static volatile unsigned diag_n;
+void net_pico_diag(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(diag_buf[diag_n % 6], sizeof diag_buf[0], fmt, ap);
+    va_end(ap);
+    char *e = diag_buf[diag_n % 6] + strlen(diag_buf[diag_n % 6]);
+    while (e > diag_buf[diag_n % 6] && (e[-1] == '\n' || e[-1] == '\r')) *--e = 0;
+    diag_n++;
+}
 
 void net_pico_lwip_assert(const char *msg)
 {
@@ -124,6 +153,7 @@ static int wifi_join(void *ctx, const char *ssid, const char *pass)
     uint32_t auth = pass[0] ? CYW43_AUTH_WPA2_MIXED_PSK : CYW43_AUTH_OPEN;
     if (cyw43_arch_wifi_connect_async(ssid, pass[0] ? pass : NULL, auth) != 0) return AT_NET_FAIL;
     uint32_t t0 = to_ms_since_boot(get_absolute_time());
+    bool seen_nonet = false;
     while (to_ms_since_boot(get_absolute_time()) - t0 < 30000) {
         int st = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
         if (st == CYW43_LINK_UP) {
@@ -132,11 +162,16 @@ static int wifi_join(void *ctx, const char *ssid, const char *pass)
             return AT_NET_OK;
         }
         if (st == CYW43_LINK_BADAUTH) return AT_NET_BAD_PASSWORD;
-        if (st == CYW43_LINK_NONET) return AT_NET_NO_AP;
         if (st == CYW43_LINK_FAIL) return AT_NET_FAIL;
+        if (st == CYW43_LINK_NONET) {
+            /* comme cyw43_arch_wifi_connect_until : le réseau n'est pas encore
+               vu (fréquent juste après le boot) → on relance jusqu'au délai */
+            seen_nonet = true;
+            if (cyw43_arch_wifi_connect_async(ssid, pass[0] ? pass : NULL, auth) != 0) return AT_NET_FAIL;
+        }
         wait_ms(100);
     }
-    return AT_NET_TIMEOUT;
+    return seen_nonet ? AT_NET_NO_AP : AT_NET_TIMEOUT;
 }
 
 static void wifi_leave(void *ctx)
@@ -239,48 +274,7 @@ static void ip_info(void *ctx, struct at_ip_info *info)
     info->dhcp = modem->cfg.dhcp;
 }
 
-/* -------------------------------------------------------------- TCP */
-
-static void tcp_detach(struct tcp_pcb *p)
-{
-    tcp_arg(p, NULL);
-    tcp_recv(p, NULL);
-    tcp_err(p, NULL);
-    tcp_sent(p, NULL);
-    if (tcp_close(p) != ERR_OK) tcp_abort(p);
-}
-
-static err_t on_recv(void *arg, struct tcp_pcb *p, struct pbuf *buf, err_t err)
-{
-    (void)arg; (void)err;
-    if (!buf) {                                   /* fermeture distante */
-        at_modem_remote_closed(modem);
-        if (p == pcb) { tcp_detach(p); pcb = NULL; }
-        return ERR_OK;
-    }
-    if (p == pending_pcb) return ERR_MEM;                          /* appel non décroché : lwIP garde les données */
-    if (at_modem_rx_space(modem) < buf->tot_len) return ERR_MEM; /* lwIP réessaie */
-    for (struct pbuf *q = buf; q; q = q->next) at_modem_rx_push(modem, q->payload, q->len);
-    tcp_recved(p, buf->tot_len);
-    pbuf_free(buf);
-    return ERR_OK;
-}
-
-static void on_err(void *arg, err_t err)
-{
-    (void)arg; (void)err;
-    /* le pcb est déjà libéré par lwIP */
-    if (connect_state == 0) connect_state = -1;
-    pcb = NULL;
-    at_modem_remote_closed(modem);
-}
-
-static err_t on_connected(void *arg, struct tcp_pcb *p, err_t err)
-{
-    (void)arg; (void)p;
-    connect_state = (err == ERR_OK) ? 1 : -1;
-    return ERR_OK;
-}
+/* -------------------------------------------------------------- DNS */
 
 static void on_dns(const char *name, const ip_addr_t *addr, void *arg)
 {
@@ -305,34 +299,278 @@ static bool resolve(const char *host, ip_addr_t *out)
     return true;
 }
 
-static int tcp_connect_op(void *ctx, const char *host, uint16_t port)
+/* --------------------------------------------------------- TCP / TLS */
+/*
+ * Une seule API (altcp) pour le TCP en clair et le TLS. En TLS : config
+ * client mbedTLS avec les racines embarquées (certs/roots.pem → roots_pem),
+ * vérification obligatoire de la chaîne et du nom (SNI), dates vérifiées
+ * dans tls_verify_cb (heure SNTP exigée), ticket de session réutilisé pour
+ * le même hôte:port (prophet.neo ouvre une connexion par bloc « Range »).
+ */
+extern const unsigned char roots_pem[];
+extern const size_t roots_pem_len;
+extern const int roots_pem_count;
+
+static struct altcp_tls_config *tls_conf;
+static bool tls_conf_verify_set;
+static struct altcp_tls_session tls_session;
+static bool tls_session_valid;
+static char tls_session_host[AT_HOST_MAX + 8];
+static volatile int tls_last_err;        /* dernier code mbedTLS (0 = aucun) */
+static uint32_t connect_t0;
+static volatile int last_lwip_err;       /* dernier err_t reçu (on_err / on_connected) */
+static volatile uint32_t last_err_ms;
+static char tls_info_buf[760];
+static uint32_t tls_handshake_ms;        /* durée du dernier handshake       */
+static const char *tls_suite = "";       /* suite négociée                   */
+static bool tls_resumed;
+
+/* mbedtls_time() → time() → _gettimeofday (newlib, remplace la version faible
+   du SDK) : heure SNTP, sans verrou (utilisable dans le contexte lwIP). */
+int _gettimeofday(struct timeval *tv, void *tz)
+{
+    (void)tz;
+    if (!tv) return -1;
+    if (!sntp_epoch) { tv->tv_sec = 0; tv->tv_usec = 0; return 0; }
+    uint32_t d = to_ms_since_boot(get_absolute_time()) - sntp_at_ms;
+    tv->tv_sec = sntp_epoch + d / 1000;
+    tv->tv_usec = (suseconds_t)((d % 1000) * 1000);
+    return 0;
+}
+
+/* MBEDTLS_PLATFORM_MS_TIME_ALT : temps monotone en ms (tickets, délais). */
+mbedtls_ms_time_t mbedtls_ms_time(void)
+{
+    return (mbedtls_ms_time_t)to_ms_since_boot(get_absolute_time());
+}
+
+/* Rappel mbedTLS par certificat de la chaîne : ajoute EXPIRED / FUTURE selon
+   l'heure SNTP (mbedTLS ne le fait pas sans MBEDTLS_HAVE_TIME_DATE). */
+static volatile uint32_t tls_verify_flags[4];
+static volatile uint32_t tls_verify_ms[4];   /* instant (ms après connect) de chaque vérification */
+static volatile int tls_verify_depths;
+
+static int tls_verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flags)
+{
+    (void)ctx;
+    struct timeval tv;
+    _gettimeofday(&tv, NULL);
+    if (tv.tv_sec == 0) { *flags |= MBEDTLS_X509_BADCERT_OTHER; return 0; }
+    int now6[6];
+    civil_from_epoch(tv.tv_sec, now6);
+    int from[6] = { crt->valid_from.year, crt->valid_from.mon, crt->valid_from.day,
+                    crt->valid_from.hour, crt->valid_from.min, crt->valid_from.sec };
+    int to[6]   = { crt->valid_to.year, crt->valid_to.mon, crt->valid_to.day,
+                    crt->valid_to.hour, crt->valid_to.min, crt->valid_to.sec };
+    if (cmp6(now6, from) < 0) *flags |= MBEDTLS_X509_BADCERT_FUTURE;
+    if (cmp6(now6, to) > 0)   *flags |= MBEDTLS_X509_BADCERT_EXPIRED;
+    if (depth >= 0 && depth < 4) {
+        tls_verify_flags[depth] = *flags;
+        tls_verify_ms[depth] = to_ms_since_boot(get_absolute_time()) - connect_t0;
+        if (depth + 1 > tls_verify_depths) tls_verify_depths = depth + 1;
+    }
+    return 0;
+}
+
+/* Journal mbedTLS : on ne garde que les alertes et les échecs (net_pico_diag). */
+static void tls_dbg(void *ctx, int level, const char *file, int line, const char *str)
+{
+    (void)ctx; (void)file; (void)line;
+    if (level <= 1 || strstr(str, "alert") || strstr(str, "fail"))
+        net_pico_diag("mbedtls: %s", str);
+}
+
+static bool tls_init(void)
+{
+    if (tls_conf) return true;
+    cyw43_arch_lwip_begin();
+    tls_conf = altcp_tls_create_config_client(roots_pem, roots_pem_len); /* → VERIFY_REQUIRED */
+    cyw43_arch_lwip_end();
+    altcp_tls_init_session(&tls_session);
+    return tls_conf != NULL;
+}
+
+static const char *tls_info_op(void *ctx)
+{
+    (void)ctx;
+    int n = snprintf(tls_info_buf, sizeof tls_info_buf,
+             "TLS: mbedTLS " MBEDTLS_VERSION_STRING ", TLS 1.2 client, verify CA+SNI+dates, roots: %d (ISRG Root X1), "
+             "time: %s, last handshake: %lu ms (%s%s), last err: %d at %lu ms, verify:",
+             roots_pem_count, sntp_epoch ? "synced" : "NONE", (unsigned long)tls_handshake_ms,
+             tls_suite, tls_resumed ? ", resumed" : "", last_lwip_err, (unsigned long)last_err_ms);
+    for (int i = 0; i < tls_verify_depths && n < (int)sizeof tls_info_buf - 12; i++)
+        n += snprintf(tls_info_buf + n, sizeof tls_info_buf - n, " d%d=0x%lx@%lums", i, (unsigned long)tls_verify_flags[i], (unsigned long)tls_verify_ms[i]);
+    for (unsigned i = 0; i < 6 && n < (int)sizeof tls_info_buf - 4; i++) {
+        unsigned k = (diag_n + i) % 6;
+        if (diag_buf[k][0]) n += snprintf(tls_info_buf + n, sizeof tls_info_buf - n, "\r\nlwip: %s", diag_buf[k]);
+    }
+    return tls_info_buf;
+}
+
+static void handshake_guard(bool on);
+
+static const char *tls_selftest_op(void *ctx)
+{
+    (void)ctx;
+    static char buf[160];
+    watchdog_update();
+    int aes = mbedtls_aes_self_test(0);   watchdog_update();
+    int gcm = mbedtls_gcm_self_test(0);   watchdog_update();
+    int s256 = mbedtls_sha256_self_test(0); watchdog_update();
+    int s512 = mbedtls_sha512_self_test(0); watchdog_update();
+    int drbg = mbedtls_ctr_drbg_self_test(0); watchdog_update();
+    handshake_guard(true);                /* ecp : plusieurs secondes */
+    int ecp = mbedtls_ecp_self_test(0);
+    handshake_guard(false);
+    watchdog_update();
+    int mpi = mbedtls_mpi_self_test(0);
+    snprintf(buf, sizeof buf, "selftest aes=%d gcm=%d sha256=%d sha512=%d ctr_drbg=%d ecp=%d mpi=%d (0 = OK)",
+             aes, gcm, s256, s512, drbg, ecp, mpi);
+    return buf;
+}
+
+static struct altcp_pcb *pcb;            /* connexion active                  */
+static struct altcp_pcb *listen_pcb;     /* écoute                            */
+static struct altcp_pcb *pending_pcb;    /* appel entrant non répondu         */
+static volatile int connect_state;       /* 0 en cours, 1 ok, <0 erreur       */
+static bool pcb_is_tls;
+
+/* Le handshake TLS (ECDSA/ECDHE) s'exécute dans le contexte lwIP (IRQ de
+   basse priorité) et peut occuper le CPU plus de 8 s d'affilée sur RP2040,
+   au-delà du maximum du watchdog. Pendant un handshake, ce timer (IRQ
+   prioritaire) rafraîchit le watchdog, au plus TLS_HANDSHAKE_MAX_S secondes. */
+#define TLS_HANDSHAKE_MAX_S 60
+static repeating_timer_t handshake_timer;
+static volatile int handshake_guard_s;
+
+static bool handshake_tick(repeating_timer_t *t)
+{
+    (void)t;
+    if (handshake_guard_s > 0) { handshake_guard_s--; watchdog_update(); }
+    return true;
+}
+
+static void handshake_guard(bool on)
+{
+    static bool timer_started;
+    if (on && !timer_started) {
+        add_repeating_timer_ms(1000, handshake_tick, NULL, &handshake_timer);
+        timer_started = true;
+    }
+    handshake_guard_s = on ? TLS_HANDSHAKE_MAX_S : 0;
+}
+
+static void pcb_detach(struct altcp_pcb *p)
+{
+    altcp_arg(p, NULL);
+    altcp_recv(p, NULL);
+    altcp_err(p, NULL);
+    altcp_sent(p, NULL);
+    if (altcp_close(p) != ERR_OK) altcp_abort(p);
+}
+
+static err_t on_recv(void *arg, struct altcp_pcb *p, struct pbuf *buf, err_t err)
+{
+    (void)arg; (void)err;
+    if (!buf) {                                   /* fermeture distante */
+        at_modem_remote_closed(modem);
+        if (p == pcb) { pcb_detach(p); pcb = NULL; }
+        return ERR_OK;
+    }
+    if (p == pending_pcb) return ERR_MEM;                          /* appel non décroché : lwIP garde les données */
+    if (at_modem_rx_space(modem) < buf->tot_len) return ERR_MEM; /* lwIP réessaie */
+    for (struct pbuf *q = buf; q; q = q->next) at_modem_rx_push(modem, q->payload, q->len);
+    altcp_recved(p, buf->tot_len);
+    pbuf_free(buf);
+    return ERR_OK;
+}
+
+static void on_err(void *arg, err_t err)
+{
+    (void)arg;
+    last_lwip_err = err; last_err_ms = to_ms_since_boot(get_absolute_time()) - connect_t0;
+    /* le pcb est déjà libéré par lwIP / altcp */
+    if (connect_state == 0) connect_state = (err == ERR_CLSD || err == ERR_RST || err == ERR_ABRT) ? -2 : -1;
+    pcb = NULL;
+    at_modem_remote_closed(modem);
+}
+
+static err_t on_connected(void *arg, struct altcp_pcb *p, err_t err)
+{
+    (void)arg;
+    if (err != ERR_OK) { last_lwip_err = 100 + err; last_err_ms = to_ms_since_boot(get_absolute_time()) - connect_t0; }
+    if (err == ERR_OK && pcb_is_tls) {
+        tls_handshake_ms = to_ms_since_boot(get_absolute_time()) - connect_t0;
+        mbedtls_ssl_context *ssl = altcp_tls_context(p);
+        tls_suite = mbedtls_ssl_get_ciphersuite(ssl);
+        tls_resumed = (tls_verify_depths == 0);
+        /* ticket/identifiant de session pour la prochaine connexion au même hôte */
+        if (altcp_tls_get_session(p, &tls_session) == ERR_OK) tls_session_valid = true;
+    }
+    connect_state = (err == ERR_OK) ? 1 : -1;
+    return ERR_OK;
+}
+
+static int tcp_connect_op(void *ctx, const char *host, uint16_t port, bool tls)
 {
     (void)ctx;
     ip_addr_t addr;
     net_pico_stage(11);
+    if (tls) {
+        if (!sntp_epoch) return AT_NET_NO_TIME;           /* certificats non vérifiables */
+        if (!tls_init()) return AT_NET_NO_TLS;
+    }
     if (!resolve(host, &addr)) return AT_NET_DNS_FAIL;
     net_pico_stage(12);
+    char hostport[sizeof tls_session_host];
+    snprintf(hostport, sizeof hostport, "%s:%u", host, port);
+    tls_last_err = 0;
+    tls_verify_depths = 0;
     cyw43_arch_lwip_begin();
-    struct tcp_pcb *p = tcp_new_ip_type(IP_GET_TYPE(&addr));
+    struct altcp_pcb *p = tls ? altcp_tls_new(tls_conf, IP_GET_TYPE(&addr))
+                              : altcp_tcp_new_ip_type(IP_GET_TYPE(&addr));
     if (!p) { cyw43_arch_lwip_end(); return AT_NET_FAIL; }
-    tcp_recv(p, on_recv);
-    tcp_err(p, on_err);
+    if (tls) {
+        mbedtls_ssl_context *ssl = altcp_tls_context(p);
+        mbedtls_ssl_set_hostname(ssl, host);                       /* SNI + vérification du nom */
+        if (!tls_conf_verify_set) {
+            /* ceinture et bretelles avec ALTCP_MBEDTLS_AUTHMODE : jamais OPTIONAL */
+            mbedtls_ssl_conf_authmode((mbedtls_ssl_config *)ssl->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+            mbedtls_ssl_conf_verify((mbedtls_ssl_config *)ssl->conf, tls_verify_cb, NULL);
+            mbedtls_ssl_conf_dbg((mbedtls_ssl_config *)ssl->conf, tls_dbg, NULL);
+            mbedtls_debug_set_threshold(2);
+            tls_conf_verify_set = true;
+        }
+        if (tls_session_valid && !strcmp(tls_session_host, hostport))
+            altcp_tls_set_session(p, &tls_session);
+        else
+            tls_session_valid = false;
+        strcpy(tls_session_host, hostport);
+    }
+    altcp_recv(p, on_recv);
+    altcp_err(p, on_err);
     connect_state = 0;
     pcb = p;
-    err_t e = tcp_connect(p, &addr, port, on_connected);
+    pcb_is_tls = tls;
+    connect_t0 = to_ms_since_boot(get_absolute_time());
+    if (tls) handshake_guard(true);
+    err_t e = altcp_connect(p, &addr, port, on_connected);
     cyw43_arch_lwip_end();
     net_pico_stage(13);
-    if (e != ERR_OK) { cyw43_arch_lwip_begin(); tcp_detach(p); cyw43_arch_lwip_end(); pcb = NULL; return AT_NET_CONNECT_FAIL; }
-    uint32_t t0 = to_ms_since_boot(get_absolute_time());
-    while (connect_state == 0 && to_ms_since_boot(get_absolute_time()) - t0 < CONNECT_TIMEOUT_MS) wait_ms(1);
+    if (e != ERR_OK) { cyw43_arch_lwip_begin(); pcb_detach(p); cyw43_arch_lwip_end(); pcb = NULL; return AT_NET_CONNECT_FAIL; }
+    uint32_t timeout = tls ? TLS_CONNECT_TIMEOUT_MS : CONNECT_TIMEOUT_MS;
+    while (connect_state == 0 && to_ms_since_boot(get_absolute_time()) - connect_t0 < timeout) wait_ms(1);
+    handshake_guard(false);
     net_pico_stage(14);
     if (connect_state != 1) {
         net_pico_stage(15);
+        int st = connect_state;
         cyw43_arch_lwip_begin();
-        if (pcb) tcp_detach(pcb);
+        if (pcb) pcb_detach(pcb);
         cyw43_arch_lwip_end();
         pcb = NULL;
         modem->remote_closed = false;
+        if (tls) { tls_session_valid = false; return (st == -2 || st == -1) ? AT_NET_TLS_FAIL : AT_NET_CONNECT_FAIL; }
         return AT_NET_CONNECT_FAIL;
     }
     net_pico_stage(16);
@@ -346,12 +584,12 @@ static int tcp_send_op(void *ctx, const uint8_t *data, size_t len)
     while (len) {
         if (!pcb) return AT_NET_FAIL;
         cyw43_arch_lwip_begin();
-        size_t chunk = tcp_sndbuf(pcb);
+        size_t chunk = altcp_sndbuf(pcb);
         if (chunk > len) chunk = len;
         err_t e = ERR_OK;
         if (chunk) {
-            e = tcp_write(pcb, data, (u16_t)chunk, TCP_WRITE_FLAG_COPY);
-            if (e == ERR_OK) tcp_output(pcb);
+            e = altcp_write(pcb, data, (u16_t)chunk, TCP_WRITE_FLAG_COPY);
+            if (e == ERR_OK) altcp_output(pcb);
         }
         cyw43_arch_lwip_end();
         if (e == ERR_OK && chunk) { data += chunk; len -= chunk; t0 = to_ms_since_boot(get_absolute_time()); continue; }
@@ -366,7 +604,7 @@ static void tcp_close_op(void *ctx)
 {
     (void)ctx;
     cyw43_arch_lwip_begin();
-    if (pcb) { tcp_detach(pcb); pcb = NULL; }
+    if (pcb) { pcb_detach(pcb); pcb = NULL; }
     cyw43_arch_lwip_end();
 }
 
@@ -376,14 +614,14 @@ static bool tcp_connected_op(void *ctx)
     return pcb != NULL && connect_state == 1;
 }
 
-static err_t on_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
+static err_t on_accept(void *arg, struct altcp_pcb *newpcb, err_t err)
 {
     (void)arg;
     if (err != ERR_OK || !newpcb) return ERR_VAL;
-    if (pcb || pending_pcb) { tcp_abort(newpcb); return ERR_ABRT; } /* occupé */
+    if (pcb || pending_pcb) { altcp_abort(newpcb); return ERR_ABRT; } /* occupé */
     pending_pcb = newpcb;
-    tcp_recv(newpcb, on_recv);
-    tcp_err(newpcb, on_err);
+    altcp_recv(newpcb, on_recv);
+    altcp_err(newpcb, on_err);
     last_ring_ms = to_ms_since_boot(get_absolute_time());
     at_modem_ring(modem);
     return ERR_OK;
@@ -393,14 +631,14 @@ static int tcp_listen_op(void *ctx, uint16_t port)
 {
     (void)ctx;
     cyw43_arch_lwip_begin();
-    if (listen_pcb) { tcp_close(listen_pcb); listen_pcb = NULL; }
+    if (listen_pcb) { altcp_close(listen_pcb); listen_pcb = NULL; }
     int r = AT_NET_OK;
     if (port) {
-        struct tcp_pcb *p = tcp_new_ip_type(IPADDR_TYPE_ANY);
-        if (!p || tcp_bind(p, IP_ANY_TYPE, port) != ERR_OK) { if (p) tcp_close(p); r = AT_NET_FAIL; }
+        struct altcp_pcb *p = altcp_tcp_new_ip_type(IPADDR_TYPE_ANY);
+        if (!p || altcp_bind(p, IP_ANY_TYPE, port) != ERR_OK) { if (p) altcp_close(p); r = AT_NET_FAIL; }
         else {
-            listen_pcb = tcp_listen_with_backlog(p, 1);
-            if (!listen_pcb) r = AT_NET_FAIL; else tcp_accept(listen_pcb, on_accept);
+            listen_pcb = altcp_listen_with_backlog(p, 1);
+            if (!listen_pcb) r = AT_NET_FAIL; else altcp_accept(listen_pcb, on_accept);
         }
     }
     cyw43_arch_lwip_end();
@@ -412,7 +650,7 @@ static bool tcp_accept_op(void *ctx)
     (void)ctx;
     cyw43_arch_lwip_begin();
     bool ok = pending_pcb != NULL;
-    if (ok) { pcb = pending_pcb; pending_pcb = NULL; connect_state = 1; modem->remote_closed = false; }
+    if (ok) { pcb = pending_pcb; pending_pcb = NULL; connect_state = 1; pcb_is_tls = false; modem->remote_closed = false; }
     cyw43_arch_lwip_end();
     return ok;
 }
@@ -523,7 +761,7 @@ struct at_modem_ops net_pico_ops = {
     .tcp_connect = tcp_connect_op, .tcp_send = tcp_send_op, .tcp_close = tcp_close_op,
     .tcp_connected = tcp_connected_op, .tcp_listen = tcp_listen_op, .tcp_accept = tcp_accept_op,
     .config_save = config_flash_save, .sntp_time = sntp_time_op, .ping = ping_op,
-    .reset = reset_op, .bootsel = bootsel_op, .version = version_op,
+    .reset = reset_op, .bootsel = bootsel_op, .version = version_op, .tls_info = tls_info_op, .tls_selftest = tls_selftest_op,
 };
 
 bool net_pico_init(struct at_modem *m)

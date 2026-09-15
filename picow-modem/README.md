@@ -22,6 +22,12 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 - Configuration persistante (dernier secteur de flash) : SSID/mot de passe
   (`AT+CWJAP_DEF`), écho, DHCP/IP statique, DNS, SNTP, port d'écoute, S0.
   Au démarrage le Pico W rejoint le dernier réseau enregistré, comme l'ESP.
+- **TLS terminé sur le Pico W** (mbedTLS 3.6, TLS 1.2 client) : `AT+CIPSTART="SSL",…`
+  ou, pour les clients non modifiables comme `prophet.neo`, `AT+TLSPORT=443` qui
+  rend TLS toute connexion `"TCP"` vers ce port. Certificat **toujours vérifié**
+  (chaîne contre les racines embarquées `certs/roots.pem`, nom d'hôte/SNI,
+  dates via l'heure SNTP — refus si l'heure n'est pas acquise). Reprise de
+  session (ticket) pour le même hôte:port. Détail : § TLS.
 - LED de la carte : allumée = Wi-Fi associé, clignote = connexion TCP ouverte.
 - Watchdog 8 s : un blocage redémarre la carte ; `ATI` indique la cause et
   l'étape (`net_pico_stage`) ou le message d'assertion lwIP.
@@ -44,8 +50,11 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `AT+CIPSTA[_CUR|_DEF]?` / `="ip","gw","mask"` | `+CIPSTA_CUR:ip:"…"`, `:gateway:`, `:netmask:` |
 | `AT+CIPDNS[_CUR|_DEF]?` / `=1,"ip"` / `=0` | `+CIPDNS_CUR:ip` |
 | `AT+CIPMUX?` / `=0`, `AT+CIPMODE?` / `=0` | connexion unique, mode normal (`=1` → `ERROR`) |
-| `AT+CIPSSLCCONF?` / `=0` | `+CIPSSLCCONF:0` — **pas de TLS** (`=1..3` → `ERROR`) |
-| `AT+CIPSTART="TCP","hôte",port` | `CONNECT`, `OK` ; `DNS Fail` ; `ALREADY CONNECTED` |
+| `AT+CIPSSLCCONF?` / `=0` / `=2` | `+CIPSSLCCONF:2` (CA toujours vérifiée ; `=1`/`=3` cert client → `ERROR`) |
+| `AT+CIPSTART="TCP","hôte",port` | `CONNECT`, `OK` ; `DNS Fail` ; `ALREADY CONNECTED` ; TLS si le port est dans `AT+TLSPORT` |
+| `AT+CIPSTART="SSL","hôte",port` | idem en TLS ; `no time (SNTP) for TLS`, `TLS handshake failed` (certificat refusé…) → `ERROR` |
+| `AT+TLSPORT?` / `=443[,p2,p3,p4]` / `=0` | ports pour lesquels `"TCP"` est fait en TLS (persistant) ; `=0` efface |
+| `AT+TLSTEST` | autotests mbedTLS (AES, GCM, SHA-256/512, CTR-DRBG, ECP, MPI) sur carte |
 | `AT+CIPSEND=n` (n ≤ 2048) | `OK`, `> `, puis après n octets `Recv n bytes`, `SEND OK` |
 | données entrantes | `+IPD,n:` suivi de n octets (segments ≤ 1460) ; `CLOSED` à la fermeture |
 | `AT+CIPCLOSE` | `CLOSED`, `OK` |
@@ -53,11 +62,37 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `AT+CIPSNTPCFG?` / `=en,tz,"serveur"`, `AT+CIPSNTPTIME?` | SNTP lwIP ; `+CIPSNTPTIME:Tue Sep 15 12:00:00 2026` |
 | `AT+PING="hôte"` | `+ms`, `OK` ou `+timeout`, `ERROR` |
 | `AT+CIUPDATE` | `ERROR` (pas d'OTA : reflasher un UF2) |
-| `ATI` | identité + cause du dernier reset (`power-on`, `watchdog, stage n`, `lwip assert: …`) |
+| `ATI` | identité, SSID mémorisé, cause du dernier reset, ligne `TLS:` (pile, racines, heure, durée et suite du dernier handshake, `resumed`, drapeaux de vérification, derniers messages lwIP/mbedTLS), `TLS ports:` |
 | `AT+BOOTSEL` | `OK` puis passage en mode UF2 (`RPI-RP2`) sans toucher au bouton — spécifique à ce firmware |
 
 Non pris en charge (répond `ERROR`) : UDP, `CIPMUX=1`, mode point d'accès,
-TLS, mode transparent ESP (`CIPMODE=1` ; utiliser `ATDT` à la place).
+TLS 1.3, certificat client, mode transparent ESP (`CIPMODE=1` ; utiliser
+`ATDT` à la place — `ATDT` fait aussi du TLS vers un port de `AT+TLSPORT`).
+
+## TLS
+
+- Pile : lwIP `altcp_tls` + mbedTLS 3.6.2 (`src/mbedtls_config.h`) ; TLS 1.2,
+  ECDHE-ECDSA / ECDHE-RSA / RSA, AES-GCM, SHA-256/384, P-256, P-384, X25519.
+- Vérification : `MBEDTLS_SSL_VERIFY_REQUIRED` (forcé dans `lwipopts.h`
+  **et** dans le code — la valeur par défaut d'altcp est `OPTIONAL`, qui
+  laisserait passer un certificat invalide), SNI + nom d'hôte, dates
+  vérifiées dans un rappel (`tls_date.c`, sans `gmtime_r` qui bloquerait dans
+  le contexte lwIP), heure SNTP exigée. Pas de mode « accepter tout ».
+- Racines : `certs/roots.pem` (ISRG Root X1 ; voir `certs/README.md` pour en
+  ajouter), compilé par `tools/pem2c.py`.
+- Reprise de session : ticket mémorisé par hôte:port et réutilisé à la
+  connexion suivante (`prophet.neo` ouvre une connexion par bloc `Range`).
+- Mesures sur carte (2026-09-16, Apache + Let's Encrypt, ECDHE-RSA-AES256-GCM) :
+  handshake complet **2,4–2,8 s** (chaîne de 4 certificats vérifiée en ~1,7 s),
+  handshake repris **0,3–0,5 s** ; `AT+CIPSTART` complet : 3–4 s la première
+  fois, **1,2 s** ensuite. letsencrypt.org (ECDSA, CDN) : 5 s. Flash 523 Ko,
+  BSS 85 Ko, mbedTLS sur le tas newlib.
+- Pièges rencontrés : (1) **`-O3` (GCC 14.2.1, armv6-m) produit un AES-GCM
+  faux** dans `gcm.c` → `bad_record_mac` chez tous les serveurs ; le projet
+  compile en `-O2` (`CMakeLists.txt`), `AT+TLSTEST` le vérifie ; (2) le
+  handshake s'exécute dans l'IRQ lwIP et peut dépasser les 8 s du watchdog :
+  un timer prioritaire le rafraîchit pendant le handshake (60 s max) ;
+  (3) `MBEDTLS_ECP_WINDOW_SIZE 4` : ×4 plus rapide que la valeur par défaut.
 
 ## Compilation
 
@@ -76,7 +111,7 @@ défaut = valeur de `netsetup.pas`).
 ## Tests
 
 ```
-make test          # firmware/picow-modem/tests : cœur du modem sur PC (gcc, ASan/UBSan)
+make test          # firmware/picow-modem/tests : cœur du modem + dates TLS sur PC (gcc, ASan/UBSan)
 ```
 
 `src/at_modem.c` ne dépend d'aucune API Pico : la maquette
@@ -91,7 +126,10 @@ résultats à consigner dans `docs/SPRINTS.md`.
 
 ```
 src/at_modem.[ch]     cœur portable : parseur AT/Hayes, tampon RX, +IPD, +++
-src/net_pico.[ch]     Wi-Fi (cyw43), TCP/DNS/SNTP/ping (lwIP), flash de configuration
+src/net_pico.[ch]     Wi-Fi (cyw43), TCP/TLS (altcp + mbedTLS), DNS/SNTP/ping, flash, watchdog/diagnostic
+src/tls_date.[ch]     date civile sans gmtime_r (vérification des dates de certificats)
+src/mbedtls_config.h  configuration mbedTLS (client TLS 1.2)
+certs/roots.pem       racines de confiance embarquées ; tools/pem2c.py les compile
 src/main.c            transports USB CDC + UART0, boucle principale, LED
 src/usb_descriptors.c, tusb_config.h, lwipopts.h
 tests/                tests unitaires PC

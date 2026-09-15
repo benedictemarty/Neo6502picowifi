@@ -141,6 +141,18 @@ void at_modem_config_defaults(struct at_config *cfg)
     strcpy(cfg->sntp_server, "pool.ntp.org");
 }
 
+static bool has_tls(struct at_modem *m)
+{
+    return m->ops->tls_info && m->ops->tls_info(m->ops->ctx) != NULL;
+}
+
+bool at_modem_port_is_tls(const struct at_config *cfg, uint16_t port)
+{
+    for (int i = 0; i < AT_TLS_PORTS_MAX; i++)
+        if (cfg->tls_ports[i] && cfg->tls_ports[i] == port) return true;
+    return false;
+}
+
 static void save(struct at_modem *m)
 {
     if (m->ops->config_save) m->ops->config_save(m->ops->ctx, &m->cfg);
@@ -151,8 +163,16 @@ void at_modem_init(struct at_modem *m, const struct at_modem_ops *ops,
 {
     memset(m, 0, sizeof *m);
     m->ops = ops;
-    if (cfg && cfg->magic == AT_CONFIG_MAGIC) m->cfg = *cfg;
-    else at_modem_config_defaults(&m->cfg);
+    if (cfg && cfg->magic == AT_CONFIG_MAGIC) {
+        m->cfg = *cfg;
+    } else if (cfg && cfg->magic == AT_CONFIG_MAGIC_V1) {
+        /* migration v1 → v2 : les champs ajoutés (tls_ports) sont remis à zéro */
+        m->cfg = *cfg;
+        memset(m->cfg.tls_ports, 0, sizeof m->cfg.tls_ports);
+        m->cfg.magic = AT_CONFIG_MAGIC;
+    } else {
+        at_modem_config_defaults(&m->cfg);
+    }
     m->s2 = '+';
     m->s12 = 50;
 }
@@ -227,7 +247,8 @@ static void do_dial(struct at_modem *m, const char *arg)
     }
     if (!m->ops->wifi_connected(m->ops->ctx)) { out(m, "\r\nNO CARRIER\r\n"); return; }
     if (m->ops->tcp_connected(m->ops->ctx)) { error(m); return; }
-    int r = m->ops->tcp_connect(m->ops->ctx, host, (uint16_t)port);
+    int r = m->ops->tcp_connect(m->ops->ctx, host, (uint16_t)port,
+                                at_modem_port_is_tls(&m->cfg, (uint16_t)port));
     if (r != AT_NET_OK) { out(m, "\r\nNO CARRIER\r\n"); return; }
     m->was_connected = true;
     go_online(m);
@@ -275,6 +296,15 @@ static bool hayes(struct at_modem *m, const char *cmd)
     case 'I':
         outf(m, "Neo6502drive Pico W modem %s\r\n", m->ops->version(m->ops->ctx));
         if (m->ops->boot_info) outf(m, "%s\r\n", m->ops->boot_info(m->ops->ctx));
+        outf(m, "saved SSID: \"%s\"%s\r\n", m->cfg.ssid, m->cfg.echo ? "" : " (echo off)");
+        if (has_tls(m)) {
+            out(m, m->ops->tls_info(m->ops->ctx));   /* peut dépasser le tampon d'outf */
+            out(m, "\r\n");
+            out(m, "TLS ports:");
+            for (int i = 0; i < AT_TLS_PORTS_MAX; i++)
+                if (m->cfg.tls_ports[i]) outf(m, " %u", m->cfg.tls_ports[i]);
+            out(m, "\r\n");
+        }
         ok(m);
         return true;
     case 'S': {
@@ -420,21 +450,53 @@ static void plus_command(struct at_modem *m, const char *cmd)
     } else if (starts(cmd, "CIPMODE=", &p)) {
         if (parse_int(&p, &v) && v == 0) ok(m); else error(m);
     } else if (!strcmp(cmd, "CIPSSLCCONF?")) {
-        out(m, "+CIPSSLCCONF:0\r\n");
+        /* ESP : 0 aucune, 1 cert client, 2 vérification CA, 3 les deux.
+           Ici la CA est toujours vérifiée quand TLS est disponible. */
+        outf(m, "+CIPSSLCCONF:%d\r\n", has_tls(m) ? 2 : 0);
         ok(m);
     } else if (starts(cmd, "CIPSSLCCONF=", &p)) {
-        if (parse_int(&p, &v) && v == 0) ok(m); else error(m); /* pas de TLS */
+        if (!parse_int(&p, &v)) { error(m); return; }
+        if (v == 0 || (v == 2 && has_tls(m))) ok(m); else error(m); /* pas de cert client */
+    } else if (!strcmp(cmd, "TLSTEST")) {
+        if (!m->ops->tls_selftest) { error(m); return; }
+        out(m, m->ops->tls_selftest(m->ops->ctx));
+        out(m, "\r\n");
+        ok(m);
+    } else if (!strcmp(cmd, "TLSPORT?")) {
+        out(m, "+TLSPORT:");
+        for (int i = 0, n = 0; i < AT_TLS_PORTS_MAX; i++)
+            if (m->cfg.tls_ports[i]) outf(m, "%s%u", n++ ? "," : "", m->cfg.tls_ports[i]);
+        out(m, "\r\n");
+        ok(m);
+    } else if (starts(cmd, "TLSPORT=", &p)) {
+        /* AT+TLSPORT=443[,8443…] ; AT+TLSPORT=0 efface. Persistant. */
+        uint16_t ports[AT_TLS_PORTS_MAX] = { 0 };
+        int n = 0;
+        do {
+            if (!parse_int(&p, &v) || v < 0 || v > 65535) { error(m); return; }
+            if (v && n < AT_TLS_PORTS_MAX) ports[n++] = (uint16_t)v;
+            else if (v) { error(m); return; }
+        } while (skip_comma(&p));
+        memcpy(m->cfg.tls_ports, ports, sizeof ports);
+        save(m);
+        ok(m);
     } else if (starts(cmd, "CIPSTART=", &p)) {
         char type[8], host[AT_HOST_MAX + 1];
         long port;
         if (!parse_quoted(&p, type, sizeof type) || !skip_comma(&p)
             || !parse_quoted(&p, host, sizeof host) || !skip_comma(&p)
             || !parse_int(&p, &port) || port < 1 || port > 65535) { error(m); return; }
-        if (strcmp(type, "TCP") != 0) { error(m); return; }
+        bool tls;
+        if (!strcmp(type, "TCP")) tls = at_modem_port_is_tls(&m->cfg, (uint16_t)port);
+        else if (!strcmp(type, "SSL")) tls = true;
+        else { error(m); return; }
         if (m->ops->tcp_connected(m->ops->ctx)) { out(m, "ALREADY CONNECTED\r\n"); error(m); return; }
         if (!m->ops->wifi_connected(m->ops->ctx)) { out(m, "no ip\r\n"); error(m); return; }
-        int r = m->ops->tcp_connect(m->ops->ctx, host, (uint16_t)port);
+        int r = m->ops->tcp_connect(m->ops->ctx, host, (uint16_t)port, tls);
         if (r == AT_NET_DNS_FAIL) { out(m, "DNS Fail\r\n"); error(m); return; }
+        if (r == AT_NET_NO_TIME) { out(m, "no time (SNTP) for TLS\r\n"); error(m); return; }
+        if (r == AT_NET_TLS_FAIL) { out(m, "TLS handshake failed\r\n"); error(m); return; }
+        if (r == AT_NET_NO_TLS) { out(m, "no TLS\r\n"); error(m); return; }
         if (r != AT_NET_OK) { error(m); return; }
         m->remote_closed = false;
         m->was_connected = true;

@@ -33,7 +33,12 @@ enum at_net_result {
     AT_NET_DNS_FAIL,
     AT_NET_CONNECT_FAIL,
     AT_NET_FAIL,
+    AT_NET_NO_TIME,        /* TLS refusé : heure SNTP non acquise           */
+    AT_NET_TLS_FAIL,       /* handshake / certificat refusé                 */
+    AT_NET_NO_TLS,         /* TLS non compilé sur cette plateforme          */
 };
+
+#define AT_TLS_PORTS_MAX 4
 
 /* Informations IP (chaînes déjà formatées, "0.0.0.0" si absent). */
 struct at_ip_info {
@@ -65,9 +70,11 @@ struct at_config {
     char     sntp_server[64];
     uint16_t listen_port;   /* 0 = pas d'écoute (AT+CIPSERVER / ATS0)        */
     uint8_t  s0;            /* réponse automatique (sonneries)               */
+    uint16_t tls_ports[AT_TLS_PORTS_MAX]; /* AT+TLSPORT : CIPSTART "TCP" → TLS */
 };
 
-#define AT_CONFIG_MAGIC 0x4E574D31u /* 'NWM1' */
+#define AT_CONFIG_MAGIC    0x4E574D32u /* 'NWM2' */
+#define AT_CONFIG_MAGIC_V1 0x4E574D31u /* 'NWM1' : même préfixe, sans tls_ports */
 
 /* Rappel d'énumération Wi-Fi : ecn (0 open, 2 WPA, 3 WPA2, 4 WPA/WPA2). */
 typedef void (*at_scan_cb)(void *ctx, int ecn, const char *ssid, int rssi);
@@ -86,8 +93,8 @@ struct at_modem_ops {
     int  (*wifi_scan)(void *ctx, at_scan_cb cb, void *cb_ctx);
     void (*ip_info)(void *ctx, struct at_ip_info *info);
 
-    /* TCP sortant (une connexion, comme AT+CIPMUX=0) */
-    int  (*tcp_connect)(void *ctx, const char *host, uint16_t port);
+    /* TCP sortant (une connexion, comme AT+CIPMUX=0) ; tls = TLS terminé ici */
+    int  (*tcp_connect)(void *ctx, const char *host, uint16_t port, bool tls);
     int  (*tcp_send)(void *ctx, const uint8_t *data, size_t len);
     void (*tcp_close)(void *ctx);
     bool (*tcp_connected)(void *ctx);
@@ -103,7 +110,12 @@ struct at_modem_ops {
     void (*bootsel)(void *ctx);   /* AT+BOOTSEL : mode UF2 (NULL = non supporté) */
     const char *(*version)(void *ctx);
     const char *(*boot_info)(void *ctx);  /* ATI : cause du dernier reset (NULL = rien) */
+    const char *(*tls_info)(void *ctx);   /* ATI : pile TLS, racine, heure (NULL = pas de TLS) */
+    const char *(*tls_selftest)(void *ctx); /* AT+TLSTEST : autotests des primitives (NULL = absent) */
 };
+
+/* Vrai si le port est dans la liste AT+TLSPORT. */
+bool at_modem_port_is_tls(const struct at_config *cfg, uint16_t port);
 
 enum at_mode {
     AT_MODE_COMMAND = 0,   /* interprète les lignes AT                       */
