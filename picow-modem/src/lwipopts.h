@@ -39,6 +39,11 @@
 #define LWIP_TCP_KEEPALIVE          1
 #define LWIP_STATS                  0
 
+/* Le client SNTP (et lwIP lui-même pour TCP/DNS/DHCP) réserve des sys_timeout
+   au-delà du compte interne ; sans cette marge, le premier tcp_connect après
+   sntp_init() échoue sur « pool MEMP_SYS_TIMEOUT is empty » (vu sur carte). */
+#define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 6)
+
 /* SNTP : l'heure reçue est confiée à net_pico.c */
 #define SNTP_SERVER_DNS             1
 #define SNTP_UPDATE_DELAY           3600000
@@ -46,5 +51,10 @@ void net_pico_set_time(unsigned int sec);
 #define SNTP_SET_SYSTEM_TIME(sec)   net_pico_set_time(sec)
 
 #define LWIP_DEBUG                  0
+
+/* Une assertion lwIP devient panic() dans le SDK (boucle infinie, puis reset
+   par le watchdog) ; on conserve le message pour ATI (net_pico.c). */
+void net_pico_lwip_assert(const char *msg);
+#define LWIP_PLATFORM_ASSERT(x)     net_pico_lwip_assert(x)
 
 #endif

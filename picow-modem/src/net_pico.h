@@ -12,6 +12,7 @@ extern struct at_modem_ops net_pico_ops;
 
 /* À appeler dans la boucle principale (sonneries répétées, SNTP). */
 void net_pico_poll(void);
+void net_pico_stage(uint32_t stage);   /* point d'étape pour le diagnostic watchdog */
 
 /* Configuration persistante en flash (dernier secteur). */
 void config_flash_load(struct at_config *cfg);

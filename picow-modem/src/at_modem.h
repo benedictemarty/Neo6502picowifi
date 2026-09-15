@@ -42,6 +42,7 @@ struct at_ip_info {
     char netmask[16];
     char dns[16];
     char mac[18];
+    char bssid[18];   /* MAC du point d'accès (AT+CWJAP?) */
     char ssid[AT_SSID_MAX + 1];
     int  channel;
     int  rssi;
@@ -101,6 +102,7 @@ struct at_modem_ops {
     void (*reset)(void *ctx);
     void (*bootsel)(void *ctx);   /* AT+BOOTSEL : mode UF2 (NULL = non supporté) */
     const char *(*version)(void *ctx);
+    const char *(*boot_info)(void *ctx);  /* ATI : cause du dernier reset (NULL = rien) */
 };
 
 enum at_mode {
@@ -129,6 +131,7 @@ struct at_modem {
     uint32_t last_rx_ms;       /* dernier octet reçu en ligne                */
     uint32_t plus_ms;          /* fin du 3e '+'                              */
     bool     escape_pending;   /* "+++" vu, attente du temps de garde        */
+    uint8_t  plus_held[3];     /* '+' retenus tant que l'échappement est possible */
     bool     ring_pending;     /* appel entrant non répondu                  */
     int      ring_count;
 

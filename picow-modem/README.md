@@ -23,6 +23,8 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
   (`AT+CWJAP_DEF`), écho, DHCP/IP statique, DNS, SNTP, port d'écoute, S0.
   Au démarrage le Pico W rejoint le dernier réseau enregistré, comme l'ESP.
 - LED de la carte : allumée = Wi-Fi associé, clignote = connexion TCP ouverte.
+- Watchdog 8 s : un blocage redémarre la carte ; `ATI` indique la cause et
+  l'étape (`net_pico_stage`) ou le message d'assertion lwIP.
 
 ## Commandes AT prises en charge
 
@@ -51,6 +53,7 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `AT+CIPSNTPCFG?` / `=en,tz,"serveur"`, `AT+CIPSNTPTIME?` | SNTP lwIP ; `+CIPSNTPTIME:Tue Sep 15 12:00:00 2026` |
 | `AT+PING="hôte"` | `+ms`, `OK` ou `+timeout`, `ERROR` |
 | `AT+CIUPDATE` | `ERROR` (pas d'OTA : reflasher un UF2) |
+| `ATI` | identité + cause du dernier reset (`power-on`, `watchdog, stage n`, `lwip assert: …`) |
 | `AT+BOOTSEL` | `OK` puis passage en mode UF2 (`RPI-RP2`) sans toucher au bouton — spécifique à ce firmware |
 
 Non pris en charge (répond `ERROR`) : UDP, `CIPMUX=1`, mode point d'accès,

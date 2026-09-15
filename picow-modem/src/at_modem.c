@@ -274,6 +274,7 @@ static bool hayes(struct at_modem *m, const char *cmd)
         return true;
     case 'I':
         outf(m, "Neo6502drive Pico W modem %s\r\n", m->ops->version(m->ops->ctx));
+        if (m->ops->boot_info) outf(m, "%s\r\n", m->ops->boot_info(m->ops->ctx));
         ok(m);
         return true;
     case 'S': {
@@ -341,7 +342,7 @@ static void plus_command(struct at_modem *m, const char *cmd)
             m->ops->ip_info(m->ops->ctx, &info);
             char tag[16];
             copy_str(tag, sizeof tag, cmd, strlen(cmd) - 1);
-            outf(m, "+%s:\"%s\",\"%s\",%d,%d\r\n", tag, info.ssid, info.mac, info.channel, info.rssi);
+            outf(m, "+%s:\"%s\",\"%s\",%d,%d\r\n", tag, info.ssid, info.bssid, info.channel, info.rssi);
         } else {
             out(m, "No AP\r\n");
         }
@@ -523,26 +524,50 @@ static void process_line(struct at_modem *m)
 
 /* ------------------------------------------------------ entrée série */
 
-static void input_online(struct at_modem *m, uint8_t c)
+/* Mode en ligne. Les '+' qui peuvent former "+++" (temps de garde S12 avant,
+   intervalles courts entre eux) sont retenus et ne partent vers le distant que
+   si la séquence échoue ; at_modem_poll conclut l'échappement après le temps
+   de garde qui suit. Les autres octets sont regroupés en un seul envoi TCP. */
+static void online_flush(struct at_modem *m, uint8_t *batch, size_t *n)
 {
-    uint32_t t = now(m);
-    /* Détection de "+++" avec temps de garde avant et après (S12/50 s). */
-    uint32_t guard = (uint32_t)m->s12 * 20;
-    if (c == m->s2) {
-        if (m->plus_count == 0) {
-            m->plus_count = (t - m->last_rx_ms >= guard) ? 1 : 0;
-        } else if (m->plus_count < 3 && t - m->last_rx_ms < guard) {
-            m->plus_count++;
-        } else {
-            m->plus_count = 0;
-        }
-        if (m->plus_count == 3) { m->escape_pending = true; m->plus_ms = t; }
-    } else {
-        m->plus_count = 0;
-        m->escape_pending = false;
+    if (*n && m->ops->tcp_connected(m->ops->ctx)) m->ops->tcp_send(m->ops->ctx, batch, *n);
+    *n = 0;
+}
+
+static void online_release_plus(struct at_modem *m, uint8_t *batch, size_t *n, size_t cap)
+{
+    for (int i = 0; i < m->plus_count; i++) {
+        if (*n == cap) online_flush(m, batch, n);
+        batch[(*n)++] = m->plus_held[i];
     }
-    m->last_rx_ms = t;
-    if (m->ops->tcp_connected(m->ops->ctx)) m->ops->tcp_send(m->ops->ctx, &c, 1);
+    m->plus_count = 0;
+    m->escape_pending = false;
+}
+
+static void input_online(struct at_modem *m, const uint8_t *data, size_t len)
+{
+    uint8_t batch[256];
+    size_t n = 0;
+    uint32_t guard = (uint32_t)m->s12 * 20;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t c = data[i];
+        uint32_t t = now(m);
+        bool hold = false;
+        if (c == m->s2) {
+            if (m->plus_count == 0) hold = (t - m->last_rx_ms >= guard);
+            else if (m->plus_count < 3) hold = (t - m->last_rx_ms < guard);
+        }
+        if (hold) {
+            m->plus_held[m->plus_count++] = c;
+            if (m->plus_count == 3) { m->escape_pending = true; m->plus_ms = t; }
+        } else {
+            if (m->plus_count) online_release_plus(m, batch, &n, sizeof batch);
+            if (n == sizeof batch) online_flush(m, batch, &n);
+            batch[n++] = c;
+        }
+        m->last_rx_ms = t;
+    }
+    online_flush(m, batch, &n);
 }
 
 void at_modem_input(struct at_modem *m, const uint8_t *data, size_t len)
@@ -556,9 +581,14 @@ void at_modem_input(struct at_modem *m, const uint8_t *data, size_t len)
             if (c == '\n') continue;
         }
         switch (m->mode) {
-        case AT_MODE_ONLINE:
-            input_online(m, c);
+        case AT_MODE_ONLINE: {
+            /* le reste du bloc est traité d'un coup (regroupement TCP) */
+            size_t j = i;
+            while (j < len && m->mode == AT_MODE_ONLINE) j++;
+            input_online(m, data + i, j - i);
+            i = j - 1;
             break;
+        }
         case AT_MODE_CIPSEND:
             m->send_buf[m->send_len++] = c;
             if (m->send_len == m->send_expected) {
@@ -591,14 +621,22 @@ void at_modem_poll(struct at_modem *m)
 {
     uint8_t buf[1460];
 
-    /* +++ : temps de garde écoulé après le 3e '+' */
-    if (m->mode == AT_MODE_ONLINE && m->escape_pending
-        && now(m) - m->plus_ms >= (uint32_t)m->s12 * 20) {
-        m->escape_pending = false;
-        m->plus_count = 0;
-        m->mode = AT_MODE_COMMAND;
-        m->line_len = 0;
-        ok(m);
+    /* +++ : temps de garde écoulé après le 3e '+' → mode commande (les '+'
+       retenus ne sont pas transmis) ; séquence incomplète → on les transmet. */
+    if (m->mode == AT_MODE_ONLINE && m->plus_count
+        && now(m) - m->last_rx_ms >= (uint32_t)m->s12 * 20) {
+        if (m->escape_pending) {
+            m->escape_pending = false;
+            m->plus_count = 0;
+            m->mode = AT_MODE_COMMAND;
+            m->line_len = 0;
+            ok(m);
+        } else {
+            uint8_t batch[4];
+            size_t n = 0;
+            online_release_plus(m, batch, &n, sizeof batch);
+            online_flush(m, batch, &n);
+        }
     }
 
     /* données entrantes */

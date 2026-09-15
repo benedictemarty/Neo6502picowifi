@@ -35,7 +35,7 @@ static int mscan(void *c, at_scan_cb cb, void *x) { (void)c; cb(x, 3, "Livebox-1
 static void minfo(void *c, struct at_ip_info *i) {
     (void)c; memset(i, 0, sizeof *i);
     strcpy(i->ip, "192.168.1.42"); strcpy(i->gateway, "192.168.1.1"); strcpy(i->netmask, "255.255.255.0");
-    strcpy(i->dns, "192.168.1.1"); strcpy(i->mac, "28:cd:c1:00:11:22"); strcpy(i->ssid, "Livebox-1234");
+    strcpy(i->dns, "192.168.1.1"); strcpy(i->mac, "28:cd:c1:00:11:22"); strcpy(i->bssid, "aa:bb:cc:dd:ee:ff"); strcpy(i->ssid, "Livebox-1234");
     i->channel = 6; i->rssi = -55; i->dhcp = true;
 }
 static int mconn(void *c, const char *h, uint16_t p) { (void)c; strcpy(M.last_host, h); M.last_port = p; M.tcp_up = (M.connect_result == AT_NET_OK); return M.connect_result; }
@@ -54,7 +54,7 @@ static const char *mver(void *c) { (void)c; return "0.1.0"; }
 
 static const struct at_modem_ops ops = {
     NULL, mw, mms, mjoin, mleave, mwifi, mscan, minfo, mconn, msend, mclose, mtcp,
-    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver,
+    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL,
 };
 
 static struct at_modem modem;
@@ -119,7 +119,7 @@ static void test_netinfo_sequence(void)
     CHECK_OUT("STATUS:2\r\n");
     clear_out();
     send("AT+CWJAP_CUR?\r\n");
-    CHECK_OUT("+CWJAP_CUR:\"Livebox-1234\",\"28:cd:c1:00:11:22\",6,-55\r\n");
+    CHECK_OUT("+CWJAP_CUR:\"Livebox-1234\",\"aa:bb:cc:dd:ee:ff\",6,-55\r\n");
     clear_out();
     send("AT+CIPSTA_CUR?\r\n");
     CHECK_OUT("+CIPSTA_CUR:ip:\"192.168.1.42\"\r\n+CIPSTA_CUR:gateway:\"192.168.1.1\"\r\n+CIPSTA_CUR:netmask:\"255.255.255.0\"\r\n");
@@ -315,20 +315,33 @@ static void test_hayes(void)
     at_modem_poll(&modem);
     CHECK(!strcmp(M.out, "world"));
     clear_out();
-    /* "+++" sans temps de garde : transmis, pas d'échappement */
+    /* "+++" sans temps de garde avant : transmis, pas d'échappement */
     M.ms += 100;
     send("+++");
     M.ms += 2000;
     at_modem_poll(&modem);
     CHECK(modem.mode == AT_MODE_ONLINE);
     CHECK(M.sent_len == 8);
-    /* "+++" avec garde avant et après : retour en mode commande */
+    /* garde avant mais suivi d'autres octets : les '+' retenus sont transmis, dans l'ordre */
+    M.ms += 2000;
+    send("++x");
+    CHECK(M.sent_len == 11 && !memcmp(M.sent + 8, "++x", 3));
+    /* garde avant, "++" puis silence : transmis après le temps de garde */
+    M.ms += 2000;
+    send("++");
+    CHECK(M.sent_len == 11);              /* retenus */
+    M.ms += 1100;
+    at_modem_poll(&modem);
+    CHECK(M.sent_len == 13 && modem.mode == AT_MODE_ONLINE);
+    /* "+++" avec garde avant et après : retour en mode commande, rien transmis */
     M.ms += 2000;
     send("+++");
     CHECK(modem.mode == AT_MODE_ONLINE); /* pas encore : garde après */
+    CHECK(M.sent_len == 13);
     M.ms += 1100;
     at_modem_poll(&modem);
     CHECK(modem.mode == AT_MODE_COMMAND);
+    CHECK(M.sent_len == 13);
     CHECK_OUT("OK");
     clear_out();
     send("ATO\r\n");

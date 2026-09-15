@@ -9,12 +9,14 @@
  * Les réponses sont émises sur les deux transports. La LED de la carte
  * s'allume quand le Wi-Fi est associé, clignote pendant une connexion TCP.
  */
+#include <stdio.h>
 #include <string.h>
 
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
 #include "hardware/uart.h"
 #include "hardware/irq.h"
+#include "hardware/watchdog.h"
 #include "tusb.h"
 
 #include "at_modem.h"
@@ -28,6 +30,8 @@
 #endif
 
 static struct at_modem modem;
+static char boot_info[96];
+static const char *boot_info_op(void *ctx) { (void)ctx; return boot_info; }
 
 /* --------------------------------------------------------- UART RX */
 
@@ -101,6 +105,7 @@ int main(void)
     config_flash_load(&cfg);
     net_pico_ops.write = serial_write;
     net_pico_ops.millis = millis;
+    net_pico_ops.boot_info = boot_info_op;
     at_modem_init(&modem, &net_pico_ops, &cfg);
 
     bool wifi_ok = net_pico_init(&modem);
@@ -114,20 +119,45 @@ int main(void)
         net_pico_ops.wifi_join(NULL, modem.cfg.ssid, modem.cfg.pass);
     if (wifi_ok && modem.cfg.listen_port)
         net_pico_ops.tcp_listen(NULL, modem.cfg.listen_port);
-    serial_write(NULL, (const uint8_t *)"\r\nready\r\n", 9);
+    if (watchdog_caused_reboot() && watchdog_hw->scratch[6] == 0x4C574950)
+        snprintf(boot_info, sizeof boot_info, "last reset: lwip assert: %.60s",
+                 (const char *)watchdog_hw->scratch[5]);
+    else if (watchdog_caused_reboot())
+        snprintf(boot_info, sizeof boot_info, "last reset: watchdog, stage %lu",
+                 (unsigned long)watchdog_hw->scratch[4]);
+    else
+        strcpy(boot_info, "last reset: power-on");
+    watchdog_hw->scratch[6] = 0;
+    char banner[64];
+    snprintf(banner, sizeof banner, "\r\nready (%s)\r\n", boot_info);
+    uart_write_blocking(UART_ID, (const uint8_t *)banner, strlen(banner));
+    bool banner_usb = false;   /* réémis sur l'USB à la première ouverture du port */
+    net_pico_stage(0);
+    /* Un blocage de plus de 8 s dans la boucle principale redémarre la carte. Les
+       opérations longues (CWJAP 30 s, CWLAP 15 s, CIPSTART 10 s) rafraîchissent le
+       compteur dans leurs boucles d'attente (net_pico.c : net_pico_kick). */
+    watchdog_enable(8000, true);
 
     uint8_t buf[256];
     uint32_t led_ms = 0;
     bool led = false;
     while (1) {
+        watchdog_update();
+        net_pico_stage(1);
         tud_task();
+        if (!banner_usb && tud_cdc_connected()) {
+            banner_usb = true;
+            serial_write(NULL, (const uint8_t *)banner, strlen(banner));
+        }
         size_t n = uart_drain(buf, sizeof buf);
         if (n) at_modem_input(&modem, buf, n);
         if (tud_cdc_available()) {
             n = tud_cdc_read(buf, sizeof buf);
             if (n) at_modem_input(&modem, buf, n);
         }
+        net_pico_stage(2);
         at_modem_poll(&modem);
+        net_pico_stage(3);
         net_pico_poll();
 
         uint32_t now = millis(NULL);

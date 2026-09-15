@@ -49,6 +49,20 @@ static volatile uint32_t sntp_at_ms;
 
 #define CONFIG_FLASH_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 
+static void apply_sntp_config(void);
+
+/* Attente qui rafraîchit le watchdog ; stage = point d'étape conservé dans
+   un registre scratch (lu au boot après un reset watchdog, cf. main.c). */
+static void wait_ms(uint32_t ms) { watchdog_update(); sleep_ms(ms); }
+void net_pico_stage(uint32_t stage) { watchdog_hw->scratch[4] = stage; }
+
+void net_pico_lwip_assert(const char *msg)
+{
+    watchdog_hw->scratch[5] = (uint32_t)msg;   /* chaîne en flash : lisible après reset */
+    watchdog_hw->scratch[6] = 0x4C574950;      /* 'LWIP' */
+    while (1) tight_loop_contents();           /* le watchdog redémarre la carte */
+}
+
 void config_flash_load(struct at_config *cfg)
 {
     const struct at_config *f = (const struct at_config *)(XIP_BASE + CONFIG_FLASH_OFFSET);
@@ -108,17 +122,21 @@ static int wifi_join(void *ctx, const char *ssid, const char *pass)
 {
     (void)ctx;
     uint32_t auth = pass[0] ? CYW43_AUTH_WPA2_MIXED_PSK : CYW43_AUTH_OPEN;
-    int r = cyw43_arch_wifi_connect_timeout_ms(ssid, pass[0] ? pass : NULL, auth, 30000);
-    if (r == 0) {
-        strncpy(joined_ssid, ssid, AT_SSID_MAX);
-        apply_ip_config();
-        return AT_NET_OK;
+    if (cyw43_arch_wifi_connect_async(ssid, pass[0] ? pass : NULL, auth) != 0) return AT_NET_FAIL;
+    uint32_t t0 = to_ms_since_boot(get_absolute_time());
+    while (to_ms_since_boot(get_absolute_time()) - t0 < 30000) {
+        int st = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
+        if (st == CYW43_LINK_UP) {
+            strncpy(joined_ssid, ssid, AT_SSID_MAX);
+            apply_ip_config();
+            return AT_NET_OK;
+        }
+        if (st == CYW43_LINK_BADAUTH) return AT_NET_BAD_PASSWORD;
+        if (st == CYW43_LINK_NONET) return AT_NET_NO_AP;
+        if (st == CYW43_LINK_FAIL) return AT_NET_FAIL;
+        wait_ms(100);
     }
-    if (r == PICO_ERROR_TIMEOUT) return AT_NET_TIMEOUT;
-    if (r == PICO_ERROR_BADAUTH) return AT_NET_BAD_PASSWORD;
-    int st = cyw43_wifi_link_status(&cyw43_state, CYW43_ITF_STA);
-    if (st == CYW43_LINK_NONET) return AT_NET_NO_AP;
-    return AT_NET_FAIL;
+    return AT_NET_TIMEOUT;
 }
 
 static void wifi_leave(void *ctx)
@@ -182,7 +200,7 @@ static int wifi_scan(void *ctx, at_scan_cb cb, void *cb_ctx)
     if (cyw43_wifi_scan(&cyw43_state, &opts, &s, scan_result) != 0) return AT_NET_FAIL;
     uint32_t t0 = to_ms_since_boot(get_absolute_time());
     while (cyw43_wifi_scan_active(&cyw43_state) && to_ms_since_boot(get_absolute_time()) - t0 < 15000)
-        sleep_ms(50);
+        wait_ms(50);
     /* tri par RSSI décroissant (comme AT+CWLAPOPT=1,…) */
     for (int i = 1; i < s.n; i++)
         for (int j = i; j > 0 && s.ap[j].rssi > s.ap[j - 1].rssi; j--) {
@@ -207,6 +225,10 @@ static void ip_info(void *ctx, struct at_ip_info *info)
     cyw43_wifi_get_mac(&cyw43_state, CYW43_ITF_STA, mac);
     snprintf(info->mac, sizeof info->mac, "%02x:%02x:%02x:%02x:%02x:%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    uint8_t bssid[6] = { 0 };
+    cyw43_wifi_get_bssid(&cyw43_state, bssid);
+    snprintf(info->bssid, sizeof info->bssid, "%02x:%02x:%02x:%02x:%02x:%02x",
+             bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
     strcpy(info->ssid, joined_ssid);
     int32_t rssi = 0;
     cyw43_wifi_get_rssi(&cyw43_state, &rssi);
@@ -236,6 +258,7 @@ static err_t on_recv(void *arg, struct tcp_pcb *p, struct pbuf *buf, err_t err)
         if (p == pcb) { tcp_detach(p); pcb = NULL; }
         return ERR_OK;
     }
+    if (p == pending_pcb) return ERR_MEM;                          /* appel non décroché : lwIP garde les données */
     if (at_modem_rx_space(modem) < buf->tot_len) return ERR_MEM; /* lwIP réessaie */
     for (struct pbuf *q = buf; q; q = q->next) at_modem_rx_push(modem, q->payload, q->len);
     tcp_recved(p, buf->tot_len);
@@ -276,7 +299,7 @@ static bool resolve(const char *host, ip_addr_t *out)
     if (e == ERR_OK) return true;
     if (e != ERR_INPROGRESS) return false;
     uint32_t t0 = to_ms_since_boot(get_absolute_time());
-    while (!dns_done && to_ms_since_boot(get_absolute_time()) - t0 < CONNECT_TIMEOUT_MS) sleep_ms(1);
+    while (!dns_done && to_ms_since_boot(get_absolute_time()) - t0 < CONNECT_TIMEOUT_MS) wait_ms(1);
     if (!dns_done || ip_addr_isany(&dns_result)) return false;
     *out = dns_result;
     return true;
@@ -286,7 +309,9 @@ static int tcp_connect_op(void *ctx, const char *host, uint16_t port)
 {
     (void)ctx;
     ip_addr_t addr;
+    net_pico_stage(11);
     if (!resolve(host, &addr)) return AT_NET_DNS_FAIL;
+    net_pico_stage(12);
     cyw43_arch_lwip_begin();
     struct tcp_pcb *p = tcp_new_ip_type(IP_GET_TYPE(&addr));
     if (!p) { cyw43_arch_lwip_end(); return AT_NET_FAIL; }
@@ -296,10 +321,13 @@ static int tcp_connect_op(void *ctx, const char *host, uint16_t port)
     pcb = p;
     err_t e = tcp_connect(p, &addr, port, on_connected);
     cyw43_arch_lwip_end();
+    net_pico_stage(13);
     if (e != ERR_OK) { cyw43_arch_lwip_begin(); tcp_detach(p); cyw43_arch_lwip_end(); pcb = NULL; return AT_NET_CONNECT_FAIL; }
     uint32_t t0 = to_ms_since_boot(get_absolute_time());
-    while (connect_state == 0 && to_ms_since_boot(get_absolute_time()) - t0 < CONNECT_TIMEOUT_MS) sleep_ms(1);
+    while (connect_state == 0 && to_ms_since_boot(get_absolute_time()) - t0 < CONNECT_TIMEOUT_MS) wait_ms(1);
+    net_pico_stage(14);
     if (connect_state != 1) {
+        net_pico_stage(15);
         cyw43_arch_lwip_begin();
         if (pcb) tcp_detach(pcb);
         cyw43_arch_lwip_end();
@@ -307,6 +335,7 @@ static int tcp_connect_op(void *ctx, const char *host, uint16_t port)
         modem->remote_closed = false;
         return AT_NET_CONNECT_FAIL;
     }
+    net_pico_stage(16);
     return AT_NET_OK;
 }
 
@@ -328,7 +357,7 @@ static int tcp_send_op(void *ctx, const uint8_t *data, size_t len)
         if (e == ERR_OK && chunk) { data += chunk; len -= chunk; t0 = to_ms_since_boot(get_absolute_time()); continue; }
         if (e != ERR_OK && e != ERR_MEM) return AT_NET_FAIL;
         if (to_ms_since_boot(get_absolute_time()) - t0 > SEND_TIMEOUT_MS) return AT_NET_TIMEOUT;
-        sleep_ms(1);
+        wait_ms(1);
     }
     return AT_NET_OK;
 }
@@ -458,7 +487,7 @@ static int ping_op(void *ctx, const char *host)
     }
     cyw43_arch_lwip_end();
     if (r == 0) {
-        while (ping_reply_ms < 0 && to_ms_since_boot(get_absolute_time()) - ping_sent_ms < 3000) sleep_ms(1);
+        while (ping_reply_ms < 0 && to_ms_since_boot(get_absolute_time()) - ping_sent_ms < 3000) wait_ms(1);
         r = ping_reply_ms;
     }
     cyw43_arch_lwip_begin();
