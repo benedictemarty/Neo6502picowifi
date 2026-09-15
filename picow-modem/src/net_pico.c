@@ -65,9 +65,24 @@ void config_flash_save(void *ctx, const struct at_config *cfg)
     flash_range_erase(CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
     flash_range_program(CONFIG_FLASH_OFFSET, page, sizeof page);
     restore_interrupts(irq);
+    /* AT+CIPSNTPCFG prend effet immédiatement si le Wi-Fi est déjà associé */
+    if (modem && cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
+        apply_sntp_config();
 }
 
 /* ------------------------------------------------------------ Wi-Fi */
+
+static void apply_sntp_config(void)
+{
+    cyw43_arch_lwip_begin();
+    sntp_stop();
+    if (modem->cfg.sntp_enable) {
+        sntp_setoperatingmode(SNTP_OPMODE_POLL);
+        sntp_setservername(0, modem->cfg.sntp_server);
+        sntp_init();
+    }
+    cyw43_arch_lwip_end();
+}
 
 static void apply_ip_config(void)
 {
@@ -85,13 +100,8 @@ static void apply_ip_config(void)
         ip_addr_t d;
         if (ipaddr_aton(modem->cfg.dns, &d)) dns_setserver(0, &d);
     }
-    if (modem->cfg.sntp_enable) {
-        sntp_stop();
-        sntp_setoperatingmode(SNTP_OPMODE_POLL);
-        sntp_setservername(0, modem->cfg.sntp_server);
-        sntp_init();
-    }
     cyw43_arch_lwip_end();
+    apply_sntp_config();
 }
 
 static int wifi_join(void *ctx, const char *ssid, const char *pass)
