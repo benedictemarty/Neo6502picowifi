@@ -38,7 +38,9 @@ static volatile uint16_t uart_head, uart_tail;
 static void on_uart_rx(void)
 {
     while (uart_is_readable(UART_ID)) {
-        uint8_t c = (uint8_t)uart_getc(UART_ID);
+        uint32_t dr = uart_get_hw(UART_ID)->dr;
+        if (dr & (UART_UARTDR_FE_BITS | UART_UARTDR_BE_BITS | UART_UARTDR_PE_BITS)) continue; /* octet erroné */
+        uint8_t c = (uint8_t)dr;
         uint16_t next = (uart_head + 1) % UART_RING;
         if (next != uart_tail) { uart_ring[uart_head] = c; uart_head = next; }
     }
@@ -83,8 +85,12 @@ int main(void)
     uart_init(UART_ID, UART_BAUD);
     gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
     gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
+    gpio_pull_up(UART_RX_PIN);       /* RX en l'air (UEXT non câblé) : sinon du bruit précède le premier AT */
     uart_set_format(UART_ID, 8, 1, UART_PARITY_NONE);
     uart_set_fifo_enabled(UART_ID, true);
+    sleep_ms(2);
+    while (uart_is_readable(UART_ID)) (void)uart_get_hw(UART_ID)->dr; /* parasites d'initialisation */
+    uart_get_hw(UART_ID)->rsr = 0xf;                                   /* efface les drapeaux d'erreur */
     irq_set_exclusive_handler(UART0_IRQ, on_uart_rx);
     irq_set_enabled(UART0_IRQ, true);
     uart_set_irq_enables(UART_ID, true, false);
