@@ -1,6 +1,7 @@
 # Changelog — Neo6502picowifi
 
 ## [Unreleased]
+- 2026-09-19 : remote `framagit` ajouté (Framagit `benedictemarty/Neo6502picowifi`).
 - 2026-09-19 : documentation bilingue — `README.en.md` (anglais) ajouté, `README.md` corrigé pour la
   racine du dépôt (`cmake -S . -B build`, `make -C tests`, câblage UEXT renvoyé vers
   `Neo6502drive/hardware/PICOW_UEXT.md`, CDC reconnu sous Trinity, section « Consommateurs ») ;
