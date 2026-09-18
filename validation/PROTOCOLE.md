@@ -6,7 +6,7 @@ avec les **refus** de sécurité. Modèle : `~/picowifi/validation` (protocole +
 script + rapport, versionnés avec le code).
 
 ## Prérequis
-- Pico W flashé : `make flash` (BOOTSEL) ou `AT+BOOTSEL` puis copie de l'UF2.
+- Pico W flashé : BOOTSEL ou `AT+BOOTSEL`, puis copie de `build/picow_modem.uf2` sur `RPI-RP2`.
 - Wi-Fi 2,4 GHz provisionné par le PO (`AT+CWJAP_DEF="ssid","mdp"` dans un
   terminal ; jamais dans le dépôt ni dans le script).
 - Port `/dev/ttyACM0` libre (fermer `screen`), PC sur le même réseau que le
@@ -45,6 +45,6 @@ réseau utilisé. Code de retour 0 = tout passe.
 
 ## Non couvert par le script (manuel)
 - Refus sans heure SNTP (`no time (SNTP) for TLS`) : couper le réseau avant
-  la synchro, ou tester sur PC (`make test`).
+  la synchro, ou tester sur PC (`make -C tests`).
 - Transport UART GP0/GP1 (adaptateur USB-série ou UEXT) ; Neo6502 réel avec
   `netsetup.neo` / `prophet.neo`.

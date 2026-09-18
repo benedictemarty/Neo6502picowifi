@@ -1,5 +1,7 @@
 # Neo6502picowifi — modem Wi-Fi Neo6502 sur Raspberry Pi Pico W (ex-`Neo6502drive/firmware/picow-modem`)
 
+*English version: [README.en.md](README.en.md).*
+
 Firmware C (Pico SDK 2.x, cyw43 + lwIP, TinyUSB) qui transforme un **Pico W**
 en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 
@@ -14,11 +16,12 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
   `+++` (temps de garde 1 s, S12), `ATO`, `ATH`, `ATA`, `ATE0/1`, `ATZ`,
   `ATI`, `ATS0/S2/S12`, `RING` sur appel entrant (`AT+CIPSERVER=1,port`).
 - **Deux transports simultanés**, réponses émises sur les deux :
-  - USB CDC-ACM (`/dev/ttyACM*` sur PC ; sur le Neo6502 après la story
-    F-13 « hôte CDC » du dépôt Neo6502firmware — **le firmware Neo6502
+  - USB CDC-ACM (`/dev/ttyACM*` sur PC ; sur le Neo6502 avec un firmware
+    hôte CDC — la branche `trinity` du fork Neo6502firmware le reconnaît
+    (`USB serial modem found 2E8A 000A`, 2026-09-18), **le firmware Neo6502
     officiel ignore aujourd'hui les périphériques CDC**) ;
   - UART0 GP0 (TX) / GP1 (RX), 115200 8N1 : connecteur UEXT du Neo6502,
-    utilisable **dès maintenant** (câblage dans `hardware/PICOW_UEXT.md`).
+    utilisable **dès maintenant** (câblage : `Neo6502drive/hardware/PICOW_UEXT.md`).
 - Configuration persistante (dernier secteur de flash) : SSID/mot de passe
   (`AT+CWJAP_DEF`), écho, DHCP/IP statique, DNS, SNTP, port d'écoute, S0.
   Le Pico W rejoint le dernier réseau enregistré en tâche de fond (au boot et
@@ -99,12 +102,12 @@ TLS 1.3, certificat client, mode transparent ESP (`CIPMODE=1` ; utiliser
 
 ```
 export PICO_SDK_PATH=/chemin/pico-sdk      # SDK 2.x avec lib/cyw43-driver, lwip, tinyusb
-make firmware                              # depuis la racine du dépôt
-# ou : cmake -S firmware/picow-modem -B firmware/picow-modem/build && cmake --build firmware/picow-modem/build
+cmake -S . -B build && cmake --build build # depuis la racine du dépôt
 ```
 
 Résultat : `build/picow_modem.uf2`. Flash : brancher le Pico W en maintenant
-**BOOTSEL**, puis `make flash` (copie sur le volume `RPI-RP2`).
+**BOOTSEL** (ou envoyer `AT+BOOTSEL` au modem), puis copier l'UF2 sur le
+volume `RPI-RP2`.
 
 Vitesse UART : `-DUART_BAUD=…` dans `target_compile_definitions` (115200 par
 défaut = valeur de `netsetup.pas`).
@@ -112,7 +115,7 @@ défaut = valeur de `netsetup.pas`).
 ## Tests
 
 ```
-make test          # firmware/picow-modem/tests : cœur du modem + dates TLS sur PC (gcc, ASan/UBSan)
+make -C tests      # cœur du modem (test_at_modem) + dates TLS (test_tls_date) sur PC, gcc + ASan/UBSan
 ```
 
 `src/at_modem.c` ne dépend d'aucune API Pico : la maquette
@@ -138,4 +141,13 @@ src/main.c            transports USB CDC + UART0, boucle principale, LED
 src/usb_descriptors.c, tusb_config.h, lwipopts.h
 tests/                tests unitaires PC
 validation/           protocole, script et rapports de validation sur carte
+docs/BACKLOG.md       backlog agile ; CHANGELOG.md — versions = `AT+GMR` et tags `vX.Y.Z`
 ```
+
+## Consommateurs
+
+Neo6502drive (driver 6502, terminal), Neo6502ProphetGui, Neo6502Basic
+(primitives `at`), firmware Neo6502 branche `trinity` (groupe 14 CDC, routage
+10,19). Les programmes amont (`netsetup.neo`, `prophet.neo`, `pget.neo`,
+ProphetGui) doivent continuer de fonctionner sans modification ; tout nouveau
+comportement AT est documenté ici.
