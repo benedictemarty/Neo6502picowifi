@@ -1,6 +1,9 @@
 # Changelog — Neo6502picowifi
 
 ## [Unreleased]
+- 2026-09-19 : **validé sur Neo6502 réel** (Trinity 0.1.0, TinyUSB 0.21) : modem reconnu (`USB serial modem found
+  2E8A 000A`), `netinfo.neo` (neo-networking) affiche l'IP obtenue — la chaîne hub USB → CDC hôte → routage
+  10,19 → modem → Wi-Fi fonctionne sans PC.
 - 2026-09-19 : remote `framagit` ajouté (Framagit `benedictemarty/Neo6502picowifi`).
 - 2026-09-19 : documentation bilingue — `README.en.md` (anglais) ajouté, `README.md` corrigé pour la
   racine du dépôt (`cmake -S . -B build`, `make -C tests`, câblage UEXT renvoyé vers
