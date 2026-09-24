@@ -1,3 +1,9 @@
 build/
 tests/test_at_modem
 tests/test_tls_date
+tests/test_roots_store
+tests/test_roots_ca_cb
+tests/roots_gen.c
+tests/roots_fixture_gen.c
+tests/mbedtls-host/
+__pycache__/

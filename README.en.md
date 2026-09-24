@@ -31,7 +31,8 @@ Wi-Fi modem for the Neo6502 (stories US-T1 and US-T2 in `docs/BACKLOG.md`).
   `AT+CIPSTART="SSL",…` or, for clients that cannot be changed such as
   `prophet.neo`, `AT+TLSPORT=443`, which makes every `"TCP"` connection to that
   port a TLS one. The certificate is **always verified** (chain against the
-  embedded roots `certs/roots.pem`, host name/SNI, dates from SNTP time —
+  the 150 Mozilla roots `certs/roots.pem`, kept in flash and decoded on demand,
+  host name/SNI, dates from SNTP time —
   refused if the time has not been acquired). Session resumption (ticket) for
   the same host:port. Details: § TLS.
 - Board LED: on = Wi-Fi associated, blinking = TCP connection open.
@@ -68,7 +69,7 @@ Wi-Fi modem for the Neo6502 (stories US-T1 and US-T2 in `docs/BACKLOG.md`).
 | `AT+CIPSNTPCFG?` / `=en,tz,"server"`, `AT+CIPSNTPTIME?` | lwIP SNTP; `+CIPSNTPTIME:Tue Sep 15 12:00:00 2026` |
 | `AT+PING="host"` | `+ms`, `OK` or `+timeout`, `ERROR` |
 | `AT+CIUPDATE` | `ERROR` (no OTA: reflash a UF2) |
-| `ATI` | identity, saved SSID, last reset cause, `TLS:` line (stack, roots, time, duration and cipher suite of the last handshake, `resumed`, verification flags, last lwIP/mbedTLS messages), `TLS ports:` |
+| `ATI` | identity, saved SSID, last reset cause, `TLS:` line (stack, number of roots, root used by the last handshake (`last root:`), newlib heap (`heap:` used, peak, max), time, duration and cipher suite of the last handshake, `resumed`, verification flags, last lwIP/mbedTLS messages), `TLS ports:` |
 | `AT+BOOTSEL` | `OK` then switch to UF2 mode (`RPI-RP2`) without touching the button — specific to this firmware |
 
 Not supported (answers `ERROR`): UDP, `CIPMUX=1`, access-point mode, TLS 1.3,
@@ -84,8 +85,18 @@ client certificate, ESP transparent mode (`CIPMODE=1`; use `ATDT` instead —
   certificate through), SNI + host name, dates checked in a callback
   (`tls_date.c`, without `gmtime_r`, which would block in the lwIP context),
   SNTP time required. No "accept anything" mode.
-- Roots: `certs/roots.pem` (ISRG Root X1; see `certs/README.md` to add one),
-  compiled by `tools/pem2c.py`.
+- Roots (US-T13): `certs/roots.pem` = Mozilla store (150 roots, Ubuntu
+  `ca-certificates` package; provenance and updates: `certs/README.md`).
+  `tools/roots2c.py` compiles them into concatenated DER (159,591 B, in flash)
+  plus an index sorted by the FNV-1a hash of the subject (`src/roots_store.c`).
+  No root is loaded into RAM up front: during verification mbedTLS calls
+  `roots_ca_cb` (`src/roots_ca_cb.c`, `MBEDTLS_X509_TRUSTED_CERTIFICATE_CALLBACK`)
+  with the certificate whose issuer it is looking for; only the roots with that
+  subject are decoded, without copying the DER
+  (`mbedtls_x509_crt_parse_der_nocopy`), then freed by mbedTLS. PC measurement
+  (64-bit): 6–12.5 KB peak during a verification, versus 406 KB to decode all
+  150 roots up front. Excluded at generation time: RSA keys < 2048 bits and
+  curves other than P-256/P-384.
 - Session resumption: ticket kept per host:port and reused on the next
   connection (`prophet.neo` opens one connection per `Range` block).
 - Measured on the board (2026-09-16, Apache + Let's Encrypt,
@@ -93,6 +104,7 @@ client certificate, ESP transparent mode (`CIPMODE=1`; use `ATDT` instead —
   verified in ~1.7 s), resumed handshake **0.3–0.5 s**; complete
   `AT+CIPSTART`: 3–4 s the first time, **1.2 s** afterwards. letsencrypt.org
   (ECDSA, CDN): 5 s. Flash 523 KB, BSS 85 KB, mbedTLS on the newlib heap.
+  Since US-T13: 690 KB image (build measurement, 2026-09-24), BSS unchanged.
 - Pitfalls met: (1) **`-O3` (GCC 14.2.1, armv6-m) produces a wrong AES-GCM**
   in `gcm.c` → `bad_record_mac` from every server; the project builds with
   `-O2` (`CMakeLists.txt`), `AT+TLSTEST` checks it; (2) the handshake runs in
@@ -118,6 +130,9 @@ the value in `netsetup.pas`).
 
 ```
 make -C tests      # modem core (test_at_modem) + TLS dates (test_tls_date) on the PC, gcc + ASan/UBSan
+                   # + root store: generator (test_roots2c.py), lookup (test_roots_store),
+                   #   callback against mbedTLS (test_roots_ca_cb, needs PICO_SDK_PATH or MBEDTLS_DIR);
+                   #   without mbedTLS that last test is SKIPPED with an explicit message
 ```
 
 `src/at_modem.c` depends on no Pico API: the harness `tests/test_at_modem.c`
@@ -125,9 +140,9 @@ replays the exact sequences of netinfo, netsetup, prophet
 (`CIPSTART` → `CIPSEND` → `+IPD` → `CLOSED`) and of the Hayes modem.
 
 Automated on-board validation: `python3 validation/validate.py` (protocol
-`validation/PROTOCOLE.md`, reports `validation/RAPPORT-*.md`, in French) — 55
-steps: identity, Wi-Fi, SNTP, Prophet sequence in clear and over TLS, TLS
-refusals (unknown root, wrong host name, expired, bare IP), Hayes, incoming
+`validation/PROTOCOLE.md`, reports `validation/RAPPORT-*.md`, in French) — 58
+steps: identity, Wi-Fi, SNTP, Prophet sequence in clear and over TLS,
+non-Let's Encrypt authorities (DigiCert, Sectigo), TLS refusals (unknown root, wrong host name, expired, bare IP), Hayes, incoming
 call. Prerequisite: Wi-Fi provisioned once with `screen /dev/ttyACM0 115200`
 and `AT+CWJAP_DEF="ssid","pass"`.
 
@@ -141,7 +156,9 @@ src/at_modem.[ch]     portable core: AT/Hayes parser, RX buffer, +IPD, +++
 src/net_pico.[ch]     Wi-Fi (cyw43), TCP/TLS (altcp + mbedTLS), DNS/SNTP/ping, flash, watchdog/diagnostics
 src/tls_date.[ch]     civil date without gmtime_r (certificate date checks)
 src/mbedtls_config.h  mbedTLS configuration (TLS 1.2 client)
-certs/roots.pem       embedded trust roots; tools/pem2c.py compiles them
+certs/roots.pem       trust roots (Mozilla store); tools/roots2c.py compiles them
+src/roots_store.[ch]  flash root index, lookup by subject (portable, PC-tested)
+src/roots_ca_cb.[ch]  mbedTLS callback: roots decoded on demand
 src/main.c            USB CDC + UART0 transports, main loop, LED
 src/usb_descriptors.c, tusb_config.h, lwipopts.h
 tests/                PC unit tests

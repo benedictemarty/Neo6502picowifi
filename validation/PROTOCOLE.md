@@ -19,11 +19,13 @@ script + rapport, versionnés avec le code).
 | Cible | Attendu | Prouve |
 |---|---|---|
 | `mimuma.pl:80` | `CONNECT`, `+IPD`, `CLOSED` | séquence Prophet en clair |
-| `mimuma.pl:443` (Let's Encrypt → ISRG Root X1) | `CONNECT`, puis `resumed` | chaîne, SNI, dates, reprise |
+| `mimuma.pl:443` (Let's Encrypt → ISRG Root X1) | `CONNECT`, puis `resumed` ; `ATI` : `last root: ISRG Root X1` | chaîne, SNI, dates, reprise ; racine trouvée dans le magasin en flash (US-T13) |
 | `badssl.com:443` | `CONNECT` | 2e serveur Let's Encrypt |
+| `www.digicert.com:443` | `CONNECT` ; `ATI` : `last root: DigiCert Global Root G2` | autorité RSA hors Let's Encrypt (US-T13) |
+| `github.com:443` | `CONNECT` ; `ATI` : `last root: Sectigo Public Server Authentication Root E46` | autorité ECDSA P-384 hors Let's Encrypt (US-T13) |
 | `untrusted-root.badssl.com` | `TLS handshake failed` | racine absente refusée |
 | `wrong.host.badssl.com` | `TLS handshake failed` | nom d'hôte vérifié |
-| `expired.badssl.com` | `TLS handshake failed` | expiré (et racine COMODO absente) |
+| `expired.badssl.com` | `TLS handshake failed` | expiré : la racine COMODO RSA est dans le magasin depuis US-T13, seul le contrôle des dates refuse |
 | `178.219.142.145:443` (IP) | `TLS handshake failed` | nom non vérifiable refusé |
 | `telehack.com:23` | `CONNECT`, dialogue, `+++`, `ATO`, `ATH` | modem Hayes |
 | PC → Pico `:6502` | `RING`, `ATA`, `NO CARRIER` | appel entrant |
@@ -42,6 +44,9 @@ réseau utilisé. Code de retour 0 = tout passe.
   et `AT+TLSTEST` avec `gcm=0` (sinon `-O3` a été réintroduit).
 - Ordres de grandeur : handshake complet 2–6 s, repris < 1 s, connexions
   Prophet suivantes < 2 s.
+- Mémoire (US-T13) : relever dans le rapport la valeur `heap:` (utilisé, pic,
+  max) donnée par `ATI` après chaque handshake ; le pic ne doit pas croître
+  avec le nombre de racines du magasin.
 
 ## Non couvert par le script (manuel)
 - Refus sans heure SNTP (`no time (SNTP) for TLS`) : couper le réseau avant

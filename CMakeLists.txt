@@ -16,13 +16,13 @@ set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "" FORCE)
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "" FORCE)
 pico_sdk_init()
 
-# racines de confiance (certs/roots.pem) → tableau C
+# racines de confiance (certs/roots.pem) → magasin DER + index en flash (US-T13)
 add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/roots_pem.c
-    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/pem2c.py
-            ${CMAKE_CURRENT_SOURCE_DIR}/certs/roots.pem ${CMAKE_CURRENT_BINARY_DIR}/roots_pem.c
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/certs/roots.pem ${CMAKE_CURRENT_SOURCE_DIR}/tools/pem2c.py
-    COMMENT "Génération de roots_pem.c depuis certs/roots.pem"
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/roots_gen.c
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/roots2c.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/certs/roots.pem ${CMAKE_CURRENT_BINARY_DIR}/roots_gen.c
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/certs/roots.pem ${CMAKE_CURRENT_SOURCE_DIR}/tools/roots2c.py
+    COMMENT "Génération de roots_gen.c depuis certs/roots.pem"
 )
 
 add_executable(picow_modem
@@ -30,8 +30,10 @@ add_executable(picow_modem
     src/at_modem.c
     src/net_pico.c
     src/tls_date.c
+    src/roots_store.c
+    src/roots_ca_cb.c
     src/usb_descriptors.c
-    ${CMAKE_CURRENT_BINARY_DIR}/roots_pem.c
+    ${CMAKE_CURRENT_BINARY_DIR}/roots_gen.c
 )
 target_include_directories(picow_modem PRIVATE src)
 target_compile_definitions(picow_modem PRIVATE

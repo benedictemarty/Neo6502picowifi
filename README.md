@@ -29,7 +29,8 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 - **TLS terminé sur le Pico W** (mbedTLS 3.6, TLS 1.2 client) : `AT+CIPSTART="SSL",…`
   ou, pour les clients non modifiables comme `prophet.neo`, `AT+TLSPORT=443` qui
   rend TLS toute connexion `"TCP"` vers ce port. Certificat **toujours vérifié**
-  (chaîne contre les racines embarquées `certs/roots.pem`, nom d'hôte/SNI,
+  (chaîne contre les 150 racines du magasin Mozilla `certs/roots.pem`, stockées
+  en flash et décodées à la demande, nom d'hôte/SNI,
   dates via l'heure SNTP — refus si l'heure n'est pas acquise). Reprise de
   session (ticket) pour le même hôte:port. Détail : § TLS.
 - LED de la carte : allumée = Wi-Fi associé, clignote = connexion TCP ouverte.
@@ -66,7 +67,7 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `AT+CIPSNTPCFG?` / `=en,tz,"serveur"`, `AT+CIPSNTPTIME?` | SNTP lwIP ; `+CIPSNTPTIME:Tue Sep 15 12:00:00 2026` |
 | `AT+PING="hôte"` | `+ms`, `OK` ou `+timeout`, `ERROR` |
 | `AT+CIUPDATE` | `ERROR` (pas d'OTA : reflasher un UF2) |
-| `ATI` | identité, SSID mémorisé, cause du dernier reset, ligne `TLS:` (pile, racines, heure, durée et suite du dernier handshake, `resumed`, drapeaux de vérification, derniers messages lwIP/mbedTLS), `TLS ports:` |
+| `ATI` | identité, SSID mémorisé, cause du dernier reset, ligne `TLS:` (pile, nombre de racines, racine retenue au dernier handshake (`last root:`), tas newlib (`heap:` utilisé, pic, max), heure, durée et suite du dernier handshake, `resumed`, drapeaux de vérification, derniers messages lwIP/mbedTLS), `TLS ports:` |
 | `AT+BOOTSEL` | `OK` puis passage en mode UF2 (`RPI-RP2`) sans toucher au bouton — spécifique à ce firmware |
 
 Non pris en charge (répond `ERROR`) : UDP, `CIPMUX=1`, mode point d'accès,
@@ -82,15 +83,25 @@ TLS 1.3, certificat client, mode transparent ESP (`CIPMODE=1` ; utiliser
   laisserait passer un certificat invalide), SNI + nom d'hôte, dates
   vérifiées dans un rappel (`tls_date.c`, sans `gmtime_r` qui bloquerait dans
   le contexte lwIP), heure SNTP exigée. Pas de mode « accepter tout ».
-- Racines : `certs/roots.pem` (ISRG Root X1 ; voir `certs/README.md` pour en
-  ajouter), compilé par `tools/pem2c.py`.
+- Racines (US-T13) : `certs/roots.pem` = magasin Mozilla (150 racines, paquet
+  Ubuntu `ca-certificates` ; provenance et mise à jour : `certs/README.md`).
+  `tools/roots2c.py` les compile en DER concaténés (159 591 o, en flash) + un
+  index trié par empreinte FNV-1a du sujet (`src/roots_store.c`). Aucune racine
+  n'est chargée en RAM d'avance : pendant la vérification, mbedTLS appelle
+  `roots_ca_cb` (`src/roots_ca_cb.c`, `MBEDTLS_X509_TRUSTED_CERTIFICATE_CALLBACK`)
+  avec le certificat dont il cherche l'émetteur ; seules les racines de ce sujet
+  sont décodées, sans copie du DER (`mbedtls_x509_crt_parse_der_nocopy`), puis
+  libérées par mbedTLS. Mesure PC (64 bits) : pic de 6–12,5 Ko pendant une
+  vérification, contre 406 Ko pour décoder les 150 racines d'avance. Racines
+  exclues à la génération : clé RSA < 2048 ou courbe autre que P-256/P-384.
 - Reprise de session : ticket mémorisé par hôte:port et réutilisé à la
   connexion suivante (`prophet.neo` ouvre une connexion par bloc `Range`).
 - Mesures sur carte (2026-09-16, Apache + Let's Encrypt, ECDHE-RSA-AES256-GCM) :
   handshake complet **2,4–2,8 s** (chaîne de 4 certificats vérifiée en ~1,7 s),
   handshake repris **0,3–0,5 s** ; `AT+CIPSTART` complet : 3–4 s la première
   fois, **1,2 s** ensuite. letsencrypt.org (ECDSA, CDN) : 5 s. Flash 523 Ko,
-  BSS 85 Ko, mbedTLS sur le tas newlib.
+  BSS 85 Ko, mbedTLS sur le tas newlib. Depuis US-T13 : image 690 Ko
+  (mesure de compilation du 2026-09-24), BSS inchangée.
 - Pièges rencontrés : (1) **`-O3` (GCC 14.2.1, armv6-m) produit un AES-GCM
   faux** dans `gcm.c` → `bad_record_mac` chez tous les serveurs ; le projet
   compile en `-O2` (`CMakeLists.txt`), `AT+TLSTEST` le vérifie ; (2) le
@@ -116,7 +127,15 @@ défaut = valeur de `netsetup.pas`).
 
 ```
 make -C tests      # cœur du modem (test_at_modem) + dates TLS (test_tls_date) sur PC, gcc + ASan/UBSan
+                   # + magasin de racines : générateur (test_roots2c.py), recherche (test_roots_store),
+                   #   rappel contre mbedTLS (test_roots_ca_cb, exige PICO_SDK_PATH ou MBEDTLS_DIR)
 ```
+
+`test_roots_ca_cb` compile le mbedTLS du SDK sur PC (`tests/mbedtls_host_config.h`)
+et vérifie des chaînes locales (`tests/fixtures/gen.sh` : 3 niveaux, racines
+jumelles, racine inconnue, mauvais nom) et réelles capturées (DigiCert, Sectigo,
+Let's Encrypt ; `gen.sh --real` pour les rafraîchir). Sans mbedTLS il est
+**sauté** avec un message explicite.
 
 `src/at_modem.c` ne dépend d'aucune API Pico : la maquette
 `tests/test_at_modem.c` rejoue les séquences exactes de netinfo, netsetup,
@@ -124,8 +143,9 @@ prophet (`CIPSTART` → `CIPSEND` → `+IPD` → `CLOSED`) et du modem Hayes.
 
 Validation sur carte, automatisée : `python3 validation/validate.py`
 (protocole `validation/PROTOCOLE.md`, rapports `validation/RAPPORT-*.md`) —
-55 étapes : identité, Wi-Fi, SNTP, séquence Prophet en clair et en TLS,
-refus TLS (racine inconnue, nom faux, expiré, IP), Hayes, appel entrant.
+58 étapes : identité, Wi-Fi, SNTP, séquence Prophet en clair et en TLS,
+autorités hors Let's Encrypt (DigiCert, Sectigo), refus TLS (racine inconnue,
+nom faux, expiré, IP), Hayes, appel entrant.
 Prérequis : Wi-Fi provisionné une fois avec `screen /dev/ttyACM0 115200` et
 `AT+CWJAP_DEF="ssid","pass"`.
 
@@ -136,7 +156,9 @@ src/at_modem.[ch]     cœur portable : parseur AT/Hayes, tampon RX, +IPD, +++
 src/net_pico.[ch]     Wi-Fi (cyw43), TCP/TLS (altcp + mbedTLS), DNS/SNTP/ping, flash, watchdog/diagnostic
 src/tls_date.[ch]     date civile sans gmtime_r (vérification des dates de certificats)
 src/mbedtls_config.h  configuration mbedTLS (client TLS 1.2)
-certs/roots.pem       racines de confiance embarquées ; tools/pem2c.py les compile
+certs/roots.pem       racines de confiance (magasin Mozilla) ; tools/roots2c.py les compile
+src/roots_store.[ch]  index des racines en flash, recherche par sujet (portable, testé sur PC)
+src/roots_ca_cb.[ch]  rappel mbedTLS : racines décodées à la demande
 src/main.c            transports USB CDC + UART0, boucle principale, LED
 src/usb_descriptors.c, tusb_config.h, lwipopts.h
 tests/                tests unitaires PC

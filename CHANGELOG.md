@@ -1,6 +1,26 @@
 # Changelog — Neo6502picowifi
 
 ## [Unreleased]
+- 2026-09-24 : **US-T13 implémentée — magasin de racines TLS complet en flash, consulté à la demande.**
+  - `certs/roots.pem` : 150 racines Mozilla (paquet Ubuntu `ca-certificates` 20250419, SHA-256
+    `693f7690…68ad47`) au lieu de la seule ISRG Root X1 ; provenance dans `certs/README.md`.
+  - `tools/roots2c.py` (remplace `tools/pem2c.py`) : DER concaténés en flash (159 591 o) + index trié
+    par FNV-1a du sujet ; exclut les clés non gérées (RSA < 2048, courbes ≠ P-256/P-384) et les doublons.
+  - `src/roots_store.[ch]` (recherche portable), `src/roots_ca_cb.[ch]` (rappel
+    `mbedtls_ssl_conf_ca_cb`, décodage `parse_der_nocopy`) ; `MBEDTLS_X509_TRUSTED_CERTIFICATE_CALLBACK` ;
+    `net_pico.c` : config TLS sans chaîne de CA, rappel installé avec `tls_verify_cb` (authmode, SNI
+    et dates inchangés). `ATI` : `roots: 150 in flash (on demand)`, `last root:`, `heap:` (utilisé, pic, max).
+  - Tests : `tests/test_roots2c.py` (générateur, recoupé avec `cryptography`), `tests/test_roots_store.c`
+    (1 069 vérifications), `tests/test_roots_ca_cb.c` (mbedTLS du SDK compilé sur PC : chaînes locales
+    `tests/fixtures/gen.sh`, chaînes réelles DigiCert / github.com / mimuma.pl, refus racine inconnue et
+    nom faux, racines jumelles, échec d'allocation, absence de fuite ; 337 vérifications). Mesure PC
+    64 bits : pic de 6–12,5 Ko pendant une vérification, contre 406 Ko pour décoder les 150 racines d'avance.
+    Suite complète : 164 + 10 804 + 1 069 + 337 vérifications et 8 tests Python, 0 échec.
+  - Firmware : image 518 896 → 690 292 o (2 Mio de flash), BSS 84 920 o (+100). Compilé sans avertissement
+    avec `~/pico-sdk-internal` ; `~/pico-sdk` (2.2.0) n'a pas ses sous-modules initialisés.
+  - `validation/validate.py` + `PROTOCOLE.md` : étapes `www.digicert.com`, `github.com`, contrôle de
+    `last root:` (58 étapes) ; `expired.badssl.com` n'est plus refusé que par les dates (racine COMODO
+    désormais présente). **Non validé sur carte** : aucun Pico W branché ce jour.
 - 2026-09-24 : `docs/BACKLOG.md` : story **US-T13** (P2) ajoutée — magasin de racines TLS complet en flash,
   consulté à la demande (`mbedtls_ssl_conf_ca_cb`), pour que la RAM consommée ne dépende plus du nombre de
   racines. Mesure du jour (compilation avec le SDK 2.2.0 complet) : image 518 896 o sur 2 Mio de flash,

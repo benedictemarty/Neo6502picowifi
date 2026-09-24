@@ -61,6 +61,7 @@
 /* X.509 */
 #define MBEDTLS_X509_USE_C
 #define MBEDTLS_X509_CRT_PARSE_C
+#define MBEDTLS_X509_TRUSTED_CERTIFICATE_CALLBACK  /* US-T13 : racines en flash, roots_ca_cb */
 #define MBEDTLS_ASN1_PARSE_C
 #define MBEDTLS_ASN1_WRITE_C
 #define MBEDTLS_OID_C

@@ -8,7 +8,9 @@
  */
 #include "net_pico.h"
 #include "tls_date.h"
+#include "roots_ca_cb.h"
 
+#include <malloc.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -338,14 +340,13 @@ static bool resolve(const char *host, ip_addr_t *out)
 /* --------------------------------------------------------- TCP / TLS */
 /*
  * Une seule API (altcp) pour le TCP en clair et le TLS. En TLS : config
- * client mbedTLS avec les racines embarquées (certs/roots.pem → roots_pem),
- * vérification obligatoire de la chaîne et du nom (SNI), dates vérifiées
+ * client mbedTLS sans chaîne de CA chargée : les racines (certs/roots.pem →
+ * roots_store, en flash) sont cherchées à la demande par roots_ca_cb, et seule
+ * la racine utile est décodée en RAM (US-T13) ; vérification obligatoire de
+ * la chaîne et du nom (SNI), dates vérifiées
  * dans tls_verify_cb (heure SNTP exigée), ticket de session réutilisé pour
  * le même hôte:port (prophet.neo ouvre une connexion par bloc « Range »).
  */
-extern const unsigned char roots_pem[];
-extern const size_t roots_pem_len;
-extern const int roots_pem_count;
 
 static struct altcp_tls_config *tls_conf;
 static bool tls_conf_verify_set;
@@ -356,7 +357,8 @@ static volatile int tls_last_err;        /* dernier code mbedTLS (0 = aucun) */
 static uint32_t connect_t0;
 static volatile int last_lwip_err;       /* dernier err_t reçu (on_err / on_connected) */
 static volatile uint32_t last_err_ms;
-static char tls_info_buf[760];
+static char tls_info_buf[860];
+static volatile int tls_root_idx = -1;   /* racine du magasin retenue au dernier handshake */
 static uint32_t tls_handshake_ms;        /* durée du dernier handshake       */
 static const char *tls_suite = "";       /* suite négociée                   */
 static bool tls_resumed;
@@ -400,6 +402,8 @@ static int tls_verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *
                     crt->valid_to.hour, crt->valid_to.min, crt->valid_to.sec };
     if (cmp6(now6, from) < 0) *flags |= MBEDTLS_X509_BADCERT_FUTURE;
     if (cmp6(now6, to) > 0)   *flags |= MBEDTLS_X509_BADCERT_EXPIRED;
+    int r = roots_index_of(&roots_store, crt->raw.p);   /* racine du magasin ? */
+    if (r >= 0) tls_root_idx = r;
     if (depth >= 0 && depth < 4) {
         tls_verify_flags[depth] = *flags;
         tls_verify_ms[depth] = to_ms_since_boot(get_absolute_time()) - connect_t0;
@@ -420,19 +424,35 @@ static bool tls_init(void)
 {
     if (tls_conf) return true;
     cyw43_arch_lwip_begin();
-    tls_conf = altcp_tls_create_config_client(roots_pem, roots_pem_len); /* → VERIFY_REQUIRED */
+    tls_conf = altcp_tls_create_config_client(NULL, 0);   /* CA : roots_ca_cb ; → VERIFY_REQUIRED */
     cyw43_arch_lwip_end();
     altcp_tls_init_session(&tls_session);
     return tls_conf != NULL;
 }
 
+/* Tas newlib : arena = plus haut niveau atteint par sbrk (ne redescend pas),
+   donc pic de consommation depuis le démarrage ; limite = fin de la RAM. */
+static void heap_stats(unsigned *in_use, unsigned *peak, unsigned *max)
+{
+    extern char end, __StackLimit;
+    struct mallinfo mi = mallinfo();
+    *in_use = (unsigned)mi.uordblks;
+    *peak = (unsigned)mi.arena;
+    *max = (unsigned)(&__StackLimit - &end);
+}
+
 static const char *tls_info_op(void *ctx)
 {
     (void)ctx;
+    unsigned used, peak, max;
+    heap_stats(&used, &peak, &max);
+    int ri = tls_root_idx;
     int n = snprintf(tls_info_buf, sizeof tls_info_buf,
-             "TLS: mbedTLS " MBEDTLS_VERSION_STRING ", TLS 1.2 client, verify CA+SNI+dates, roots: %d (ISRG Root X1), "
+             "TLS: mbedTLS " MBEDTLS_VERSION_STRING ", TLS 1.2 client, verify CA+SNI+dates, roots: %d in flash (on demand), "
+             "last root: %s, heap: %u used, %u peak, %u max, "
              "time: %s, last handshake: %lu ms (%s%s), last err: %d at %lu ms, verify:",
-             roots_pem_count, sntp_epoch ? "synced" : "NONE", (unsigned long)tls_handshake_ms,
+             roots_store.count, ri >= 0 ? roots_store.e[ri].name : "-", used, peak, max,
+             sntp_epoch ? "synced" : "NONE", (unsigned long)tls_handshake_ms,
              tls_suite, tls_resumed ? ", resumed" : "", last_lwip_err, (unsigned long)last_err_ms);
     for (int i = 0; i < tls_verify_depths && n < (int)sizeof tls_info_buf - 12; i++)
         n += snprintf(tls_info_buf + n, sizeof tls_info_buf - n, " d%d=0x%lx@%lums", i, (unsigned long)tls_verify_flags[i], (unsigned long)tls_verify_ms[i]);
@@ -562,6 +582,7 @@ static int tcp_connect_op(void *ctx, const char *host, uint16_t port, bool tls)
     snprintf(hostport, sizeof hostport, "%s:%u", host, port);
     tls_last_err = 0;
     tls_verify_depths = 0;
+    tls_root_idx = -1;
     cyw43_arch_lwip_begin();
     struct altcp_pcb *p = tls ? altcp_tls_new(tls_conf, IP_GET_TYPE(&addr))
                               : altcp_tcp_new_ip_type(IP_GET_TYPE(&addr));
@@ -573,6 +594,7 @@ static int tcp_connect_op(void *ctx, const char *host, uint16_t port, bool tls)
             /* ceinture et bretelles avec ALTCP_MBEDTLS_AUTHMODE : jamais OPTIONAL */
             mbedtls_ssl_conf_authmode((mbedtls_ssl_config *)ssl->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
             mbedtls_ssl_conf_verify((mbedtls_ssl_config *)ssl->conf, tls_verify_cb, NULL);
+            mbedtls_ssl_conf_ca_cb((mbedtls_ssl_config *)ssl->conf, roots_ca_cb, (void *)&roots_store);
             mbedtls_ssl_conf_dbg((mbedtls_ssl_config *)ssl->conf, tls_dbg, NULL);
             mbedtls_debug_set_threshold(2);
             tls_conf_verify_set = true;

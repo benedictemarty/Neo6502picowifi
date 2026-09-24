@@ -109,6 +109,8 @@ hd('3. TLS')
 o, dt = cmd('AT+CIPSTART="SSL","mimuma.pl",443', 60); rec('SSL mimuma.pl (Let\'s Encrypt) → CONNECT', 'CONNECT' in o, f'{dt:.1f}s')
 o, _ = cmd('ATI'); hs = o.split('last handshake: ')[1].split(',')[0] if 'last handshake: ' in o else '?'
 rec('ATI : handshake complet mesuré', 'verify: d0=0x0' in o, hs)
+heap = o.split('heap: ')[1].split(', time')[0] if 'heap: ' in o else '?'
+rec('ATI : racine ISRG Root X1 trouvée dans le magasin en flash (US-T13)', 'last root: ISRG Root X1,' in o, heap)
 o, _ = cmd(f'AT+CIPSEND={len(req)}', 2, (b'> ',))
 o, dt = cmd(req + b'\r\n', 15, (b'CLOSED',)); rec('HTTPS : réponse déchiffrée en +IPD', 'HTTP/1.1 200' in o and 'CLOSED' in o)
 o, dt = cmd('AT+CIPSTART="SSL","mimuma.pl",443', 60); rec('SSL mimuma.pl 2e fois (reprise de session)', 'CONNECT' in o, f'{dt:.1f}s')
@@ -116,9 +118,15 @@ o, _ = cmd('ATI'); rec('ATI : resumed', 'resumed' in o, o.split('last handshake:
 cmd('AT+CIPCLOSE')
 if not QUICK:
     o, dt = cmd('AT+CIPSTART="SSL","badssl.com",443', 60); rec('SSL badssl.com (ISRG Root X1) → CONNECT', 'CONNECT' in o, f'{dt:.1f}s'); cmd('AT+CIPCLOSE')
+    # US-T13 : autorités hors Let's Encrypt, racines cherchées à la demande en flash
+    for host, root in (('www.digicert.com', 'DigiCert Global Root G2'),
+                       ('github.com', 'Sectigo Public Server Authentication Root E46')):
+        o, dt = cmd(f'AT+CIPSTART="SSL","{host}",443', 60); okc = 'CONNECT' in o; cmd('AT+CIPCLOSE')
+        o, _ = cmd('ATI'); heap = o.split('heap: ')[1].split(', time')[0] if 'heap: ' in o else '?'
+        rec(f'SSL {host} ({root}) → CONNECT', okc and f'last root: {root},' in o, f'{dt:.1f}s, heap: {heap}')
     o, dt = cmd('AT+CIPSTART="SSL","untrusted-root.badssl.com",443', 60); rec('REFUS racine inconnue (untrusted-root.badssl.com)', 'TLS handshake failed' in o and 'CONNECT' not in o, f'{dt:.1f}s')
     o, dt = cmd('AT+CIPSTART="SSL","wrong.host.badssl.com",443', 60); rec('REFUS nom d\'hôte faux (wrong.host.badssl.com)', 'TLS handshake failed' in o and 'CONNECT' not in o, f'{dt:.1f}s')
-    o, dt = cmd('AT+CIPSTART="SSL","expired.badssl.com",443', 60); rec('REFUS certificat expiré / racine absente (expired.badssl.com)', 'TLS handshake failed' in o and 'CONNECT' not in o, f'{dt:.1f}s')
+    o, dt = cmd('AT+CIPSTART="SSL","expired.badssl.com",443', 60); rec('REFUS certificat expiré (expired.badssl.com, racine pourtant présente)', 'TLS handshake failed' in o and 'CONNECT' not in o, f'{dt:.1f}s')
 o, dt = cmd('AT+CIPSTART="SSL","178.219.142.145",443', 60); rec('REFUS IP directe (nom non vérifiable)', 'TLS handshake failed' in o and 'CONNECT' not in o, f'{dt:.1f}s')
 o, _ = cmd('AT+CIPSTART="SSL","x",443'); rec('DNS Fail sur hôte inexistant', 'DNS Fail' in o and 'ERROR' in o)
 
