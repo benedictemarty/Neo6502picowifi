@@ -1,6 +1,11 @@
 # Changelog — Neo6502picowifi
 
 ## [Unreleased]
+- 2026-09-24 : **US-T13 validée sur carte** (Pico W flashé depuis `fd9f879`) : `validation/validate.py`
+  **58/58** — rapport `validation/RAPPORT-validation-2026-09-24.md`. Handshakes vers ISRG Root X1,
+  DigiCert Global Root G2 et Sectigo E46 (`ATI` : `last root:` conforme) ; refus racine inconnue, nom
+  faux, expiré (désormais par la date seule), IP. Tas : pic 32 096 o sur 171 360 o, inchangé d'une
+  autorité à l'autre ; handshake complet 2,0 s, repris 130 ms.
 - 2026-09-24 : **US-T13 implémentée — magasin de racines TLS complet en flash, consulté à la demande.**
   - `certs/roots.pem` : 150 racines Mozilla (paquet Ubuntu `ca-certificates` 20250419, SHA-256
     `693f7690…68ad47`) au lieu de la seule ISRG Root X1 ; provenance dans `certs/README.md`.
