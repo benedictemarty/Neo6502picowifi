@@ -1,6 +1,13 @@
 # Changelog — Neo6502picowifi
 
 ## [Unreleased]
+- 2026-09-24 : **historique réécrit** (`git filter-repo`) pour retirer toute référence à l'outil
+  d'assistance utilisé : fichier de consignes supprimé de tous les commits, deux messages de commit
+  et deux lignes du CHANGELOG reformulés. Code inchangé : `v0.3.1` recompilé depuis l'historique
+  réécrit → UF2 identique à la release (`805d2ada…`). Tous les identifiants de commit ont changé ;
+  ceux cités dans la documentation sont mis à jour. Branche et tags poussés en force sur GitHub ;
+  Framagit a refusé le push forcé de `main` (branche protégée), tags seuls mis à jour.
+  Sauvegarde de l'historique d'avant : `~/sauvegardes-git-2026-09-24/`.
 - 2026-09-24 : release **v0.3.1 publiée** (https://github.com/benedictemarty/Neo6502picowifi/releases/tag/v0.3.1),
   UF2 SHA-256 `805d2ada4145bff676c0ee2ae1aa851beb4df52897e8579d3c688ddf07e6cb95` : **identique** à l'UF2 flashé
   et validé sur carte (58/58) — première release reproductible. Incident : le push vers GitHub a échoué
@@ -42,7 +49,7 @@ Première version publiée depuis ce dépôt : tag `v0.3.0`, UF2 en release GitH
   contrôle l'identifiant, produit `dist/picow_modem-vX.Y.Z.uf2` + SHA-256 ; `--publish` pousse sur tous
   les remotes et crée la release GitHub. Tests : `test_at_modem` (+10 : GMR, ATI avec/sans build),
   `tests/test_version.py` (VERSION ↔ CMake ↔ CHANGELOG ↔ tag).
-- 2026-09-24 : **US-T13 validée sur carte** (Pico W flashé depuis `fd9f879`) : `validation/validate.py`
+- 2026-09-24 : **US-T13 validée sur carte** (Pico W flashé depuis `92d80c5`) : `validation/validate.py`
   **58/58** — rapport `validation/RAPPORT-validation-2026-09-24.md`. Handshakes vers ISRG Root X1,
   DigiCert Global Root G2 et Sectigo E46 (`ATI` : `last root:` conforme) ; refus racine inconnue, nom
   faux, expiré (désormais par la date seule), IP. Tas : pic 32 096 o sur 171 360 o, inchangé d'une

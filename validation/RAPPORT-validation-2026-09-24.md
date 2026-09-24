@@ -1,6 +1,6 @@
 # Rapport de validation matérielle — picow-modem 0.2.0 + US-T13 — 2026-09-24
 
-- Firmware : `picow_modem.uf2` compilé depuis le commit `fd9f879` (US-T13 : magasin de 150 racines
+- Firmware : `picow_modem.uf2` compilé depuis le commit `92d80c5` (US-T13 : magasin de 150 racines
   Mozilla en flash, consulté à la demande), image 690 292 o ; `AT+GMR` indique encore 0.2.0
 - Carte : Raspberry Pi Pico W, USB CDC `/dev/ttyACM0`, flashée par `AT+BOOTSEL` + copie sur `RPI-RP2` ;
   PC Ubuntu (GCC arm-none-eabi 14.2.1, Pico SDK 2.2.0 `~/pico-sdk-internal`, mbedTLS 3.6.2)
