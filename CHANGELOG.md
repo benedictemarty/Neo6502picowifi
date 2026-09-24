@@ -1,6 +1,11 @@
 # Changelog — Neo6502picowifi
 
 ## [Unreleased]
+- 2026-09-24 : release **v0.3.1 publiée** (https://github.com/benedictemarty/Neo6502picowifi/releases/tag/v0.3.1),
+  UF2 SHA-256 `805d2ada4145bff676c0ee2ae1aa851beb4df52897e8579d3c688ddf07e6cb95` : **identique** à l'UF2 flashé
+  et validé sur carte (58/58) — première release reproductible. Incident : le push vers GitHub a échoué
+  pendant `release.sh --publish` (le script s'est arrêté avant de créer la release, comme prévu) ; push
+  relancé à la main, puis release créée avec `gh release create` à partir des fichiers de `dist/`.
 
 ## 0.3.1 — 2026-09-24
 Version corrective.
