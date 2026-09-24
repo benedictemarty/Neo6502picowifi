@@ -1,6 +1,11 @@
 # Changelog — Neo6502picowifi
 
 ## [Unreleased]
+- 2026-09-24 : release **v0.3.0 publiée** (https://github.com/benedictemarty/Neo6502picowifi/releases/tag/v0.3.0,
+  UF2 SHA-256 `94c77ba54be21bf3203d58ec7f9a860f46274b7193b852030556c9c19037595a`) ; tag poussé sur GitHub et
+  Framagit. L'UF2 téléchargé depuis la release a été flashé : `ATI` → `modem 0.3.0` / `build: v0.3.0`,
+  `AT+GMR` → `Bin version(Pico W):0.3.0`, `validate.py` **58/58**. Backlog : US-W4 (cause de reset
+  « watchdog » après un reflashage) et US-W5 (compilation non reproductible : `__DATE__`/`__TIME__`).
 
 ## 0.3.0 — 2026-09-24
 Première version publiée depuis ce dépôt : tag `v0.3.0`, UF2 en release GitHub.
