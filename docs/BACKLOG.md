@@ -22,7 +22,7 @@ fonctionner sans modification.
 |----|---|------------|------|
 | US-W1 | P1 | En tant qu'utilisateur, je veux voir le modem **reconnu par le Neo6502** (firmware Trinity : `USB serial modem found 2E8A 000A`), afin de valider la chaîne USB hub → CDC. | **Terminé 2026-09-18** (carte Neo6502 4×USB-A, Trinity 0.0.1 ; un câble USB défectueux avait masqué le modem) |
 | US-W2 | P1 | En tant qu'utilisateur, je veux **associer le Wi-Fi sans PC** : depuis NeoBASIC (`atconnect`, projet Neo6502Basic) ou `netsetup.neo` (gitlab.com/bocianu/neo-networking), la config restant persistante (`AT+CWJAP_DEF`). | TODO |
-| US-W3 | P2 | En tant que PO, je veux des **versions** du modem (`AT+GMR` : `Bin version(Pico W):x.y.z`, tag `vX.Y.Z`, UF2 en release) et un CHANGELOG, afin de savoir ce qui tourne sur la carte. | TODO (0.2.0 actuelle, non taguée) |
+| US-W3 | P2 | En tant que PO, je veux des **versions** du modem (`AT+GMR` : `Bin version(Pico W):x.y.z`, tag `vX.Y.Z`, UF2 en release) et un CHANGELOG, afin de savoir ce qui tourne sur la carte. | **Terminé 2026-09-24** — `VERSION` source unique, `build:` dans `ATI` (git describe), `tools/release.sh`, tag `v0.3.0` + UF2 en release GitHub ; tests `test_version.py` et `test_at_modem` |
 
 ## Ajouts 2026-09-24 (certificats)
 | ID | P | User story | État |

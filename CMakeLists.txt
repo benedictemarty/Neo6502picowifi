@@ -6,7 +6,9 @@ cmake_minimum_required(VERSION 3.13)
 set(PICO_BOARD pico_w CACHE STRING "Carte cible")
 include($ENV{PICO_SDK_PATH}/pico_sdk_init.cmake)
 
-project(picow_modem C CXX ASM)
+# Version : fichier VERSION (source unique, semver) ; release = tag vX.Y.Z (tools/release.sh).
+file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/VERSION PICOW_VERSION LIMIT_COUNT 1)
+project(picow_modem VERSION ${PICOW_VERSION} LANGUAGES C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 # -O2 et non -O3 (défaut Release du SDK) : avec GCC 14.2.1 pour Cortex-M0+,
 # gcm.c de mbedTLS 3.6.2 compilé en -O3 donne un AES-GCM faux (autotest
@@ -35,9 +37,17 @@ add_executable(picow_modem
     src/usb_descriptors.c
     ${CMAKE_CURRENT_BINARY_DIR}/roots_gen.c
 )
-target_include_directories(picow_modem PRIVATE src)
+# identifiant de build (git describe), recalculé à chaque compilation
+add_custom_target(picow_build_id
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR} -DOUT=${CMAKE_CURRENT_BINARY_DIR}/build_id.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_id.cmake
+    BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/build_id.h
+    COMMENT "Identifiant de build (git describe)"
+)
+add_dependencies(picow_modem picow_build_id)
+target_include_directories(picow_modem PRIVATE src ${CMAKE_CURRENT_BINARY_DIR})
 target_compile_definitions(picow_modem PRIVATE
-    PICOW_MODEM_VERSION="0.2.0"
+    PICOW_MODEM_VERSION="${PROJECT_VERSION}"
     CYW43_HOST_NAME="neo6502-modem"
 )
 target_compile_options(picow_modem PRIVATE -Wall -Wextra)

@@ -295,6 +295,7 @@ static bool hayes(struct at_modem *m, const char *cmd)
         return true;
     case 'I':
         outf(m, "Neo6502drive Pico W modem %s\r\n", m->ops->version(m->ops->ctx));
+        if (m->ops->build) outf(m, "build: %s\r\n", m->ops->build(m->ops->ctx));
         if (m->ops->boot_info) outf(m, "%s\r\n", m->ops->boot_info(m->ops->ctx));
         outf(m, "saved SSID: \"%s\"%s\r\n", m->cfg.ssid, m->cfg.echo ? "" : " (echo off)");
         if (has_tls(m)) {

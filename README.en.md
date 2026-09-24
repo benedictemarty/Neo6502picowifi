@@ -44,7 +44,7 @@ Wi-Fi modem for the Neo6502 (stories US-T1 and US-T2 in `docs/BACKLOG.md`).
 | Command | Response (ESP8266 AT 1.x format) |
 |---|---|
 | `AT`, `ATE0`, `ATE1` | `OK` |
-| `AT+GMR` | `AT version:…`, `SDK version:…`, `OK` |
+| `AT+GMR` | `AT version:…`, `SDK version:…`, `Bin version(Pico W):X.Y.Z` (`VERSION` file), `OK` |
 | `AT+RST`, `AT+RESTORE` | `OK` then reboot (RESTORE erases the configuration) |
 | `AT+CWMODE?` / `=1` | `+CWMODE:1` (station only; `=2`/`=3` → `ERROR`) |
 | `AT+CWJAP[_CUR|_DEF]="ssid","pass"` | `WIFI CONNECTED`, `WIFI GOT IP`, `OK` or `+CWJAP:n`, `FAIL` |
@@ -69,7 +69,7 @@ Wi-Fi modem for the Neo6502 (stories US-T1 and US-T2 in `docs/BACKLOG.md`).
 | `AT+CIPSNTPCFG?` / `=en,tz,"server"`, `AT+CIPSNTPTIME?` | lwIP SNTP; `+CIPSNTPTIME:Tue Sep 15 12:00:00 2026` |
 | `AT+PING="host"` | `+ms`, `OK` or `+timeout`, `ERROR` |
 | `AT+CIUPDATE` | `ERROR` (no OTA: reflash a UF2) |
-| `ATI` | identity, saved SSID, last reset cause, `TLS:` line (stack, number of roots, root used by the last handshake (`last root:`), newlib heap (`heap:` used, peak, max), time, duration and cipher suite of the last handshake, `resumed`, verification flags, last lwIP/mbedTLS messages), `TLS ports:` |
+| `ATI` | identity (`modem X.Y.Z`), `build:` line (`git describe`: `vX.Y.Z` for a release, `vX.Y.Z-N-gSHA[-dirty]` otherwise), saved SSID, last reset cause, `TLS:` line (stack, number of roots, root used by the last handshake (`last root:`), newlib heap (`heap:` used, peak, max), time, duration and cipher suite of the last handshake, `resumed`, verification flags, last lwIP/mbedTLS messages), `TLS ports:` |
 | `AT+BOOTSEL` | `OK` then switch to UF2 mode (`RPI-RP2`) without touching the button — specific to this firmware |
 
 Not supported (answers `ERROR`): UDP, `CIPMUX=1`, access-point mode, TLS 1.3,
@@ -126,6 +126,17 @@ Output: `build/picow_modem.uf2`. Flashing: plug the Pico W in while holding
 UART speed: `-DUART_BAUD=…` in `target_compile_definitions` (default 115200 =
 the value in `netsetup.pas`).
 
+## Versions and releases
+
+- Version: the `VERSION` file (semver) is the single source; `CMakeLists.txt` reads it, `AT+GMR` and
+  `ATI` show it. `ATI` also shows the build id (`git describe`, recomputed on every build):
+  `build: v0.3.0` = the release UF2, any other suffix = a work build.
+- Release: bump `VERSION`, move the CHANGELOG `[Unreleased]` entries under `## X.Y.Z — date`,
+  commit, then `PICO_SDK_PATH=… tools/release.sh` (tests, `vX.Y.Z` tag, build,
+  `dist/picow_modem-vX.Y.Z.uf2` + SHA-256); `--publish` pushes `main` and the tag to every remote
+  and creates the GitHub release with the UF2.
+- `make -C tests` checks `VERSION` ↔ CMake ↔ CHANGELOG ↔ tag consistency (`tests/test_version.py`).
+
 ## Tests
 
 ```
@@ -164,6 +175,7 @@ src/usb_descriptors.c, tusb_config.h, lwipopts.h
 tests/                PC unit tests
 validation/           on-board validation protocol, script and reports
 docs/BACKLOG.md       agile backlog (French); CHANGELOG.md — versions match `AT+GMR` and tags `vX.Y.Z`
+VERSION               version (semver); cmake/build_id.cmake: build id; tools/release.sh
 ```
 
 ## Consumers

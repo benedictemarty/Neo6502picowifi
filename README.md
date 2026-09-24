@@ -42,7 +42,7 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | Commande | Réponse (format ESP8266 AT 1.x) |
 |---|---|
 | `AT`, `ATE0`, `ATE1` | `OK` |
-| `AT+GMR` | `AT version:…`, `SDK version:…`, `OK` |
+| `AT+GMR` | `AT version:…`, `SDK version:…`, `Bin version(Pico W):X.Y.Z` (fichier `VERSION`), `OK` |
 | `AT+RST`, `AT+RESTORE` | `OK` puis redémarrage (RESTORE efface la configuration) |
 | `AT+CWMODE?` / `=1` | `+CWMODE:1` (station seule ; `=2`/`=3` → `ERROR`) |
 | `AT+CWJAP[_CUR|_DEF]="ssid","pass"` | `WIFI CONNECTED`, `WIFI GOT IP`, `OK` ou `+CWJAP:n`, `FAIL` |
@@ -67,7 +67,7 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `AT+CIPSNTPCFG?` / `=en,tz,"serveur"`, `AT+CIPSNTPTIME?` | SNTP lwIP ; `+CIPSNTPTIME:Tue Sep 15 12:00:00 2026` |
 | `AT+PING="hôte"` | `+ms`, `OK` ou `+timeout`, `ERROR` |
 | `AT+CIUPDATE` | `ERROR` (pas d'OTA : reflasher un UF2) |
-| `ATI` | identité, SSID mémorisé, cause du dernier reset, ligne `TLS:` (pile, nombre de racines, racine retenue au dernier handshake (`last root:`), tas newlib (`heap:` utilisé, pic, max), heure, durée et suite du dernier handshake, `resumed`, drapeaux de vérification, derniers messages lwIP/mbedTLS), `TLS ports:` |
+| `ATI` | identité (`modem X.Y.Z`), ligne `build:` (`git describe` : `vX.Y.Z` pour une release, `vX.Y.Z-N-gSHA[-dirty]` sinon), SSID mémorisé, cause du dernier reset, ligne `TLS:` (pile, nombre de racines, racine retenue au dernier handshake (`last root:`), tas newlib (`heap:` utilisé, pic, max), heure, durée et suite du dernier handshake, `resumed`, drapeaux de vérification, derniers messages lwIP/mbedTLS), `TLS ports:` |
 | `AT+BOOTSEL` | `OK` puis passage en mode UF2 (`RPI-RP2`) sans toucher au bouton — spécifique à ce firmware |
 
 Non pris en charge (répond `ERROR`) : UDP, `CIPMUX=1`, mode point d'accès,
@@ -123,6 +123,17 @@ volume `RPI-RP2`.
 Vitesse UART : `-DUART_BAUD=…` dans `target_compile_definitions` (115200 par
 défaut = valeur de `netsetup.pas`).
 
+## Versions et releases
+
+- Version : fichier `VERSION` (semver), seule source ; `CMakeLists.txt` la lit, `AT+GMR` et `ATI`
+  l'affichent. `ATI` donne en plus l'identifiant de build (`git describe`, recalculé à chaque
+  compilation) : `build: v0.3.0` = UF2 de la release, tout autre suffixe = compilation de travail.
+- Release : incrémenter `VERSION`, déplacer les entrées de `[Unreleased]` du CHANGELOG sous
+  `## X.Y.Z — date`, commiter, puis `PICO_SDK_PATH=… tools/release.sh` (tests, tag `vX.Y.Z`,
+  compilation, `dist/picow_modem-vX.Y.Z.uf2` + SHA-256) ; `--publish` pousse `main` et le tag sur tous
+  les remotes et crée la release GitHub avec l'UF2.
+- `make -C tests` contrôle la cohérence `VERSION` ↔ CMake ↔ CHANGELOG ↔ tag (`tests/test_version.py`).
+
 ## Tests
 
 ```
@@ -164,6 +175,7 @@ src/usb_descriptors.c, tusb_config.h, lwipopts.h
 tests/                tests unitaires PC
 validation/           protocole, script et rapports de validation sur carte
 docs/BACKLOG.md       backlog agile ; CHANGELOG.md — versions = `AT+GMR` et tags `vX.Y.Z`
+VERSION               version (semver) ; cmake/build_id.cmake : identifiant de build ; tools/release.sh
 ```
 
 ## Consommateurs

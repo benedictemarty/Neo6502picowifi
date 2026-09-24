@@ -60,7 +60,7 @@ static const char *mver(void *c) { (void)c; return "0.1.0"; }
 
 static const struct at_modem_ops ops = {
     NULL, mw, mms, mjoin, mleave, mwifi, mscan, minfo, mconn, msend, mclose, mtcp,
-    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL, mtls, NULL,
+    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL, mtls, NULL, NULL,
 };
 
 static struct at_modem modem;
@@ -485,6 +485,38 @@ static void test_config_persist(void)
     CHECK(modem.cfg.ssid[0] == 0 && modem.cfg.echo == 1);
 }
 
+/* US-W3 : Bin version = fichier VERSION ; ATI ajoute l'identifiant de build s'il est fourni. */
+static const char *mbuild(void *c) { (void)c; return "v0.1.0-3-gabc1234-dirty"; }
+
+static void test_version(void)
+{
+    reset_mock();
+    send("ATE0\r\n");
+    clear_out();
+    send("AT+GMR\r\n");
+    CHECK_OUT("AT version:1.7.4.0(Neo6502drive)\r\n");
+    CHECK_OUT("SDK version:0.1.0\r\n");
+    CHECK_OUT("Bin version(Pico W):0.1.0\r\n");
+    CHECK_OUT("OK");
+    clear_out();
+    send("ATI\r\n");
+    CHECK_OUT("Neo6502drive Pico W modem 0.1.0\r\n");
+    CHECK_NOT_OUT("build:");                              /* ops.build = NULL */
+
+    struct at_modem_ops with_build = ops;
+    with_build.build = mbuild;
+    at_modem_init(&modem, &with_build, NULL);
+    send("ATE0\r\n");
+    clear_out();
+    send("ATI\r\n");
+    CHECK_OUT("Neo6502drive Pico W modem 0.1.0\r\nbuild: v0.1.0-3-gabc1234-dirty\r\n");
+    CHECK_OUT("OK");
+    clear_out();
+    send("AT+GMR\r\n");
+    CHECK_OUT("Bin version(Pico W):0.1.0\r\n");         /* GMR reste au format ESP, sans build */
+    CHECK_NOT_OUT("dirty");
+}
+
 int main(void)
 {
     test_basic();
@@ -495,6 +527,7 @@ int main(void)
     test_hayes();
     test_tls();
     test_config_persist();
+    test_version();
     printf("%d vérifications, %d échec(s)\n", checks, failures);
     return failures ? 1 : 0;
 }

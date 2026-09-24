@@ -7,3 +7,4 @@ tests/roots_gen.c
 tests/roots_fixture_gen.c
 tests/mbedtls-host/
 __pycache__/
+dist/

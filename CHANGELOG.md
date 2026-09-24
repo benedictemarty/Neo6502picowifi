@@ -1,6 +1,18 @@
 # Changelog — Neo6502picowifi
 
 ## [Unreleased]
+
+## 0.3.0 — 2026-09-24
+Première version publiée depuis ce dépôt : tag `v0.3.0`, UF2 en release GitHub.
+- 2026-09-24 : **US-W3 — versions.** Fichier `VERSION` (semver) = source unique : lu par
+  `CMakeLists.txt` (`project(... VERSION)`, `PICOW_MODEM_VERSION`) ; plus de version codée en dur ni de
+  repli `0.1.0` dans `net_pico.c` (`#error` si absente). Identifiant de build `git describe` recalculé à
+  chaque compilation (`cmake/build_id.cmake` → `build_id.h`) et affiché par `ATI` (ligne `build: v0.3.0`,
+  ou `v0.3.0-N-gSHA[-dirty]` hors release) ; `AT+GMR` garde le format ESP (`Bin version(Pico W):0.3.0`).
+  `tools/release.sh` : vérifie (main, arbre propre, section CHANGELOG), lance les tests, tague, compile,
+  contrôle l'identifiant, produit `dist/picow_modem-vX.Y.Z.uf2` + SHA-256 ; `--publish` pousse sur tous
+  les remotes et crée la release GitHub. Tests : `test_at_modem` (+10 : GMR, ATI avec/sans build),
+  `tests/test_version.py` (VERSION ↔ CMake ↔ CHANGELOG ↔ tag).
 - 2026-09-24 : **US-T13 validée sur carte** (Pico W flashé depuis `fd9f879`) : `validation/validate.py`
   **58/58** — rapport `validation/RAPPORT-validation-2026-09-24.md`. Handshakes vers ISRG Root X1,
   DigiCert Global Root G2 et Sectigo E46 (`ATI` : `last root:` conforme) ; refus racine inconnue, nom

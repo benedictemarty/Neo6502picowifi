@@ -45,8 +45,9 @@
 #include "lwip/inet_chksum.h"
 #include "lwip/apps/sntp.h"
 
+#include "build_id.h"            /* PICOW_MODEM_BUILD : git describe (cmake/build_id.cmake) */
 #ifndef PICOW_MODEM_VERSION
-#define PICOW_MODEM_VERSION "0.1.0"
+#error "PICOW_MODEM_VERSION est défini par CMakeLists.txt depuis le fichier VERSION"
 #endif
 
 #define CONNECT_TIMEOUT_MS 10000
@@ -808,6 +809,7 @@ static void bootsel_op(void *ctx)
 }
 
 static const char *version_op(void *ctx) { (void)ctx; return PICOW_MODEM_VERSION; }
+static const char *build_op(void *ctx) { (void)ctx; return PICOW_MODEM_BUILD; }
 
 /* ------------------------------------------------------------- init */
 
@@ -819,7 +821,7 @@ struct at_modem_ops net_pico_ops = {
     .tcp_connect = tcp_connect_op, .tcp_send = tcp_send_op, .tcp_close = tcp_close_op,
     .tcp_connected = tcp_connected_op, .tcp_listen = tcp_listen_op, .tcp_accept = tcp_accept_op,
     .config_save = config_flash_save, .sntp_time = sntp_time_op, .ping = ping_op,
-    .reset = reset_op, .bootsel = bootsel_op, .version = version_op, .tls_info = tls_info_op, .tls_selftest = tls_selftest_op,
+    .reset = reset_op, .bootsel = bootsel_op, .version = version_op, .build = build_op, .tls_info = tls_info_op, .tls_selftest = tls_selftest_op,
 };
 
 bool net_pico_init(struct at_modem *m)
