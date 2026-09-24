@@ -1,6 +1,10 @@
 # Changelog — Neo6502picowifi
 
 ## [Unreleased]
+- 2026-09-24 : `docs/BACKLOG.md` : story **US-T13** (P2) ajoutée — magasin de racines TLS complet en flash,
+  consulté à la demande (`mbedtls_ssl_conf_ca_cb`), pour que la RAM consommée ne dépende plus du nombre de
+  racines. Mesure du jour (compilation avec le SDK 2.2.0 complet) : image 518 896 o sur 2 Mio de flash,
+  ~1,5 Mio libres ; `.bss` 84 820 o sur 256 Kio de RAM. Aucun changement de code.
 - 2026-09-19 : **validé sur Neo6502 réel** (Trinity 0.1.0, TinyUSB 0.21) : modem reconnu (`USB serial modem found
   2E8A 000A`), `netinfo.neo` (neo-networking) affiche l'IP obtenue — la chaîne hub USB → CDC hôte → routage
   10,19 → modem → Wi-Fi fonctionne sans PC.
