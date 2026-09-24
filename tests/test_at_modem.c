@@ -60,7 +60,7 @@ static const char *mver(void *c) { (void)c; return "0.1.0"; }
 
 static const struct at_modem_ops ops = {
     NULL, mw, mms, mjoin, mleave, mwifi, mscan, minfo, mconn, msend, mclose, mtcp,
-    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL, mtls, NULL, NULL,
+    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL, mtls, NULL, NULL, NULL,
 };
 
 static struct at_modem modem;
@@ -487,6 +487,7 @@ static void test_config_persist(void)
 
 /* US-W3 : Bin version = fichier VERSION ; ATI ajoute l'identifiant de build s'il est fourni. */
 static const char *mbuild(void *c) { (void)c; return "v0.1.0-3-gabc1234-dirty"; }
+static const char *mdate(void *c) { (void)c; return "Sep 24 2026 14:10:58 UTC"; }
 
 static void test_version(void)
 {
@@ -497,6 +498,7 @@ static void test_version(void)
     CHECK_OUT("AT version:1.7.4.0(Neo6502drive)\r\n");
     CHECK_OUT("SDK version:0.1.0\r\n");
     CHECK_OUT("Bin version(Pico W):0.1.0\r\n");
+    CHECK_OUT("compile time:unknown\r\n");               /* US-W5 : pas de __DATE__ ; ops.build_date = NULL */
     CHECK_OUT("OK");
     clear_out();
     send("ATI\r\n");
@@ -505,6 +507,7 @@ static void test_version(void)
 
     struct at_modem_ops with_build = ops;
     with_build.build = mbuild;
+    with_build.build_date = mdate;
     at_modem_init(&modem, &with_build, NULL);
     send("ATE0\r\n");
     clear_out();
@@ -514,6 +517,7 @@ static void test_version(void)
     clear_out();
     send("AT+GMR\r\n");
     CHECK_OUT("Bin version(Pico W):0.1.0\r\n");         /* GMR reste au format ESP, sans build */
+    CHECK_OUT("compile time:Sep 24 2026 14:10:58 UTC\r\n");
     CHECK_NOT_OUT("dirty");
 }
 

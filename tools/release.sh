@@ -34,6 +34,12 @@ trap 'rm -rf "$B"' EXIT
 cmake -S . -B "$B" >/dev/null
 cmake --build "$B" -j8 >/dev/null
 grep -q "\"$TAG\"" "$B/build_id.h" || die "identifiant de build inattendu : $(cat "$B/build_id.h")"
+echo "== reproductibilité (seconde compilation, autre répertoire)"
+B2=$(mktemp -d)
+trap 'rm -rf "$B" "$B2"' EXIT
+cmake -S . -B "$B2" >/dev/null
+cmake --build "$B2" -j8 >/dev/null
+cmp -s "$B/picow_modem.uf2" "$B2/picow_modem.uf2" || die "compilation non reproductible : les deux UF2 diffèrent"
 mkdir -p dist
 cp "$B/picow_modem.uf2" "dist/picow_modem-$TAG.uf2"
 (cd dist && sha256sum "picow_modem-$TAG.uf2" > "picow_modem-$TAG.uf2.sha256")

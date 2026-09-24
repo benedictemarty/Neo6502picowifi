@@ -9,6 +9,7 @@
  * Les réponses sont émises sur les deux transports. La LED de la carte
  * s'allume quand le Wi-Fi est associé, clignote pendant une connexion TCP.
  */
+#include "reset_cause.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -119,16 +120,16 @@ int main(void)
     if (wifi_ok && modem.cfg.ssid[0]) net_pico_background_join(true);
     if (wifi_ok && modem.cfg.listen_port)
         net_pico_ops.tcp_listen(NULL, modem.cfg.listen_port);
-    if (watchdog_caused_reboot() && watchdog_hw->scratch[6] == 0x4C574950)
-        snprintf(boot_info, sizeof boot_info, "last reset: lwip assert: %.60s",
-                 (const char *)watchdog_hw->scratch[5]);
-    else if (watchdog_caused_reboot())
-        snprintf(boot_info, sizeof boot_info, "last reset: watchdog, stage %lu",
-                 (unsigned long)watchdog_hw->scratch[4]);
-    else
-        strcpy(boot_info, "last reset: power-on");
-    watchdog_hw->scratch[6] = 0;
-    char banner[64];
+    struct reset_state rs = {
+        .by_watchdog = watchdog_caused_reboot(),
+        .watchdog_timeout = watchdog_enable_caused_reboot(),   /* avant watchdog_enable() */
+        .marker = watchdog_hw->scratch[RESET_SCRATCH_MARKER],
+        .stage = watchdog_hw->scratch[RESET_SCRATCH_STAGE],
+        .lwip_msg = (const char *)watchdog_hw->scratch[RESET_SCRATCH_MSG],
+    };
+    reset_cause_format(&rs, boot_info, sizeof boot_info);
+    watchdog_hw->scratch[RESET_SCRATCH_MARKER] = 0;
+    char banner[sizeof boot_info + 16];
     snprintf(banner, sizeof banner, "\r\nready (%s)\r\n", boot_info);
     uart_write_blocking(UART_ID, (const uint8_t *)banner, strlen(banner));
     bool banner_usb = false;   /* réémis sur l'USB à la première ouverture du port */

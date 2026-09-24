@@ -342,9 +342,11 @@ static void plus_command(struct at_modem *m, const char *cmd)
 
     if (!strcmp(cmd, "GMR")) {
         outf(m, "AT version:1.7.4.0(Neo6502drive)\r\nSDK version:%s\r\n"
-                "compile time:" __DATE__ " " __TIME__ "\r\n"
+                "compile time:%s\r\n"
                 "Bin version(Pico W):%s\r\n",
-             m->ops->version(m->ops->ctx), m->ops->version(m->ops->ctx));
+             m->ops->version(m->ops->ctx),
+             m->ops->build_date ? m->ops->build_date(m->ops->ctx) : "unknown",
+             m->ops->version(m->ops->ctx));
         ok(m);
     } else if (!strcmp(cmd, "RST")) {
         ok(m);

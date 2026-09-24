@@ -32,6 +32,7 @@ add_executable(picow_modem
     src/at_modem.c
     src/net_pico.c
     src/tls_date.c
+    src/reset_cause.c
     src/roots_store.c
     src/roots_ca_cb.c
     src/usb_descriptors.c

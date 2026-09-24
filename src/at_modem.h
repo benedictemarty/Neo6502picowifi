@@ -113,6 +113,7 @@ struct at_modem_ops {
     const char *(*tls_info)(void *ctx);   /* ATI : pile TLS, racine, heure (NULL = pas de TLS) */
     const char *(*tls_selftest)(void *ctx); /* AT+TLSTEST : autotests des primitives (NULL = absent) */
     const char *(*build)(void *ctx);      /* ATI : identifiant de build, git describe (NULL = rien) */
+    const char *(*build_date)(void *ctx); /* AT+GMR « compile time » : date du commit (NULL = unknown) */
 };
 
 /* Vrai si le port est dans la liste AT+TLSPORT. */

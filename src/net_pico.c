@@ -9,6 +9,7 @@
 #include "net_pico.h"
 #include "tls_date.h"
 #include "roots_ca_cb.h"
+#include "reset_cause.h"
 
 #include <malloc.h>
 #include <stdarg.h>
@@ -72,7 +73,7 @@ static void apply_sntp_config(void);
 /* Attente qui rafraîchit le watchdog ; stage = point d'étape conservé dans
    un registre scratch (lu au boot après un reset watchdog, cf. main.c). */
 static void wait_ms(uint32_t ms) { watchdog_update(); sleep_ms(ms); }
-void net_pico_stage(uint32_t stage) { watchdog_hw->scratch[4] = stage; }
+void net_pico_stage(uint32_t stage) { watchdog_hw->scratch[RESET_SCRATCH_STAGE] = stage; }
 
 /* Derniers messages de diagnostic lwIP (LWIP_PLATFORM_DIAG), pour ATI. */
 static char diag_buf[6][80];
@@ -90,8 +91,8 @@ void net_pico_diag(const char *fmt, ...)
 
 void net_pico_lwip_assert(const char *msg)
 {
-    watchdog_hw->scratch[5] = (uint32_t)msg;   /* chaîne en flash : lisible après reset */
-    watchdog_hw->scratch[6] = 0x4C574950;      /* 'LWIP' */
+    watchdog_hw->scratch[RESET_SCRATCH_MSG] = (uint32_t)msg;   /* chaîne en flash : lisible après reset */
+    watchdog_hw->scratch[RESET_SCRATCH_MARKER] = RESET_MARK_LWIP;
     while (1) tight_loop_contents();           /* le watchdog redémarre la carte */
 }
 
@@ -797,6 +798,7 @@ static void reset_op(void *ctx)
 {
     (void)ctx;
     sleep_ms(50);
+    watchdog_hw->scratch[RESET_SCRATCH_MARKER] = RESET_MARK_RST;
     watchdog_reboot(0, 0, 10);
     while (1) tight_loop_contents();
 }
@@ -805,11 +807,13 @@ static void bootsel_op(void *ctx)
 {
     (void)ctx;
     sleep_ms(50);
+    watchdog_hw->scratch[RESET_SCRATCH_MARKER] = RESET_MARK_BSEL;
     reset_usb_boot(0, 0);
 }
 
 static const char *version_op(void *ctx) { (void)ctx; return PICOW_MODEM_VERSION; }
 static const char *build_op(void *ctx) { (void)ctx; return PICOW_MODEM_BUILD; }
+static const char *build_date_op(void *ctx) { (void)ctx; return PICOW_MODEM_DATE; }
 
 /* ------------------------------------------------------------- init */
 
@@ -821,7 +825,7 @@ struct at_modem_ops net_pico_ops = {
     .tcp_connect = tcp_connect_op, .tcp_send = tcp_send_op, .tcp_close = tcp_close_op,
     .tcp_connected = tcp_connected_op, .tcp_listen = tcp_listen_op, .tcp_accept = tcp_accept_op,
     .config_save = config_flash_save, .sntp_time = sntp_time_op, .ping = ping_op,
-    .reset = reset_op, .bootsel = bootsel_op, .version = version_op, .build = build_op, .tls_info = tls_info_op, .tls_selftest = tls_selftest_op,
+    .reset = reset_op, .bootsel = bootsel_op, .version = version_op, .build = build_op, .build_date = build_date_op, .tls_info = tls_info_op, .tls_selftest = tls_selftest_op,
 };
 
 bool net_pico_init(struct at_modem *m)

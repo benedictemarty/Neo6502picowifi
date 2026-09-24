@@ -1,6 +1,25 @@
 # Changelog — Neo6502picowifi
 
 ## [Unreleased]
+
+## 0.3.1 — 2026-09-24
+Version corrective.
+- **US-W4 — cause du dernier reset.** `ATI` affichait `last reset: watchdog, stage 0` après un simple
+  `AT+RST` ou un reflashage. Causes : `watchdog_caused_reboot()` est vrai pour tout reset passant par le
+  watchdog (bootrom, `watchdog_reboot`), et le numéro d'étape était écrit dans `scratch[4]`, registre où
+  `watchdog_enable()` pose la marque qui distingue un vrai dépassement — marque donc effacée à chaque étape.
+  Correctif : classification portable `src/reset_cause.[ch]`, marqueurs du modem dans `scratch[0..2]`
+  (4 à 7 réservés au SDK et au bootrom), `watchdog_enable_caused_reboot()` pour les dépassements, marqueurs
+  posés par `AT+RST` et `AT+BOOTSEL`. Valeurs : `power-on`, `AT+RST`, `AT+BOOTSEL (UF2 flash)`,
+  `reboot (bootloader or debugger)`, `watchdog timeout, stage N`, `lwip assert: …`. Test PC
+  `tests/test_reset_cause.c` (14 vérifications). Sur carte : les quatre premières constatées ; le vrai
+  dépassement n'a pas pu être provoqué sur carte (couvert par le test PC).
+- **US-W5 — compilation reproductible.** `AT+GMR` `compile time:` = date du commit en UTC (`build_id.h`,
+  `LC_ALL=C`) au lieu de `__DATE__`/`__TIME__` ; deux compilations dans deux répertoires donnent le même
+  UF2 ; `tools/release.sh` compile deux fois et refuse de publier si les UF2 diffèrent. `test_at_modem` :
+  +2 vérifications (`compile time`).
+- Bannière UART `ready (…)` : tampon agrandi à la taille de `boot_info` (avertissement `-Wformat-truncation`).
+- Validation sur carte avant release : `validate.py` 58/58.
 - 2026-09-24 : release **v0.3.0 publiée** (https://github.com/benedictemarty/Neo6502picowifi/releases/tag/v0.3.0,
   UF2 SHA-256 `94c77ba54be21bf3203d58ec7f9a860f46274b7193b852030556c9c19037595a`) ; tag poussé sur GitHub et
   Framagit. L'UF2 téléchargé depuis la release a été flashé : `ATI` → `modem 0.3.0` / `build: v0.3.0`,
