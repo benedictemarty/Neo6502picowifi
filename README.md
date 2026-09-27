@@ -186,3 +186,7 @@ Neo6502drive (driver 6502, terminal), Neo6502ProphetGui, Neo6502Basic
 10,19). Les programmes amont (`netsetup.neo`, `prophet.neo`, `pget.neo`,
 ProphetGui) doivent continuer de fonctionner sans modification ; tout nouveau
 comportement AT est documenté ici.
+
+## Avertissement
+
+⚠️ Avertissement : ce programme est un programme généré par Claude Code sous la supervision d'un être humain : il a été utilisé pour améliorer, développer, rendre compatible ou traduire ce logiciel.
