@@ -185,3 +185,7 @@ Neo6502drive (6502 driver, terminal), Neo6502ProphetGui, Neo6502Basic (`at`
 primitives), Neo6502 firmware `trinity` branch (CDC group 14, routing 10,19).
 Upstream programs (`netsetup.neo`, `prophet.neo`, `pget.neo`, ProphetGui) must
 keep working unmodified; any new AT behaviour is documented in `README.md`.
+
+## Licence
+
+EUPL 1.2 (European Union Public Licence): see [LICENSE](LICENSE).

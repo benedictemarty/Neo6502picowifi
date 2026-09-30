@@ -187,6 +187,10 @@ Neo6502drive (driver 6502, terminal), Neo6502ProphetGui, Neo6502Basic
 ProphetGui) doivent continuer de fonctionner sans modification ; tout nouveau
 comportement AT est documenté ici.
 
+## Licence
+
+EUPL 1.2 (European Union Public Licence) : voir [LICENSE](LICENSE).
+
 ## Avertissement
 
 ⚠️ Avertissement : ce programme est un programme généré par Claude Code sous la supervision d'un être humain : il a été utilisé pour améliorer, développer, rendre compatible ou traduire ce logiciel.
