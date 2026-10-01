@@ -70,10 +70,38 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `AT+CIUPDATE` | `ERROR` (pas d'OTA : reflasher un UF2) |
 | `ATI` | identité (`modem X.Y.Z`), ligne `build:` (`git describe` : `vX.Y.Z` pour une release, `vX.Y.Z-N-gSHA[-dirty]` sinon), SSID mémorisé, cause du dernier reset (`power-on`, `AT+RST`, `AT+BOOTSEL (UF2 flash)`, `reboot (bootloader or debugger)`, `watchdog timeout, stage N`, `lwip assert: …`), ligne `TLS:` (pile, nombre de racines, racine retenue au dernier handshake (`last root:`), tas newlib (`heap:` utilisé, pic, max), heure, durée et suite du dernier handshake, `resumed`, drapeaux de vérification, derniers messages lwIP/mbedTLS), `TLS ports:` |
 | `AT+BOOTSEL` | `OK` puis passage en mode UF2 (`RPI-RP2`) sans toucher au bouton — spécifique à ce firmware |
+| `AT+APSETUP=1` / `=0` / `?` | ouvre / ferme le point d'accès de configuration ; `+APSETUP:1,"Neo6502-modem-XXXX"` ou `+APSETUP:0` (voir ci-dessous) |
+| `AT+APSETUPPWD="…"` / `?` | mot de passe du point d'accès (8 à 63 caractères ASCII imprimables, persistant) ; défaut `neo6502wifi` |
 
 Non pris en charge (répond `ERROR`) : `CIPMUX=1`, forme UDP à 5 paramètres (port local, mode), `ATO`/`ATA` sur un lien UDP (`NO CARRIER`), mode point d'accès,
 TLS 1.3, certificat client, mode transparent ESP (`CIPMODE=1` ; utiliser
 `ATDT` à la place — `ATDT` fait aussi du TLS vers un port de `AT+TLSPORT`).
+
+## Configuration du Wi-Fi depuis un téléphone
+
+Sans PC ni `netsetup` : le modem ouvre un **point d'accès de configuration**
+
+- automatiquement au démarrage s'il n'a **aucun réseau mémorisé** ;
+- automatiquement si le réseau mémorisé reste **injoignable 60 s** après le démarrage ;
+- sur commande `AT+APSETUP=1`.
+
+1. Sur le téléphone, rejoindre le réseau **`Neo6502-modem-XXXX`** (XXXX = fin de
+   l'adresse MAC), mot de passe **`neo6502wifi`** (modifiable par `AT+APSETUPPWD`).
+2. La page s'ouvre d'elle-même (portail captif) ; sinon ouvrir **http://192.168.4.1/**.
+3. Choisir le réseau dans la liste (ou saisir son nom), entrer son mot de passe,
+   **Enregistrer et se connecter**. Le réseau est mémorisé comme par `AT+CWJAP_DEF`.
+4. En cas de succès, la page affiche l'adresse IP obtenue et le point d'accès se
+   ferme 15 s plus tard ; en cas d'échec (mot de passe refusé, réseau introuvable),
+   la page l'indique et reste disponible.
+
+Le point d'accès se ferme aussi après **10 min sans requête** ; pour le rouvrir :
+redémarrer le modem ou `AT+APSETUP=1`. Les commandes AT restent utilisables
+pendant ce temps ; `ATI` affiche la ligne `setup AP:` (SSID, mot de passe, adresse).
+
+Sécurité : le mot de passe par défaut est public (il est écrit ici) ; toute personne
+à portée peut se connecter au point d'accès tant qu'il est ouvert. Le mot de passe du
+réseau mémorisé n'est jamais affiché par la page. Le serveur DHCP, le DNS captif et la
+page web n'écoutent que sur l'interface du point d'accès (pas sur le réseau domestique).
 
 ## TLS
 
@@ -140,6 +168,7 @@ défaut = valeur de `netsetup.pas`).
 
 ```
 make -C tests      # cœur du modem (test_at_modem) + dates TLS (test_tls_date) sur PC, gcc + ASan/UBSan
+                   # + point d'accès de configuration : DHCP et DNS captif (test_dhcp_server), page (test_web_setup)
                    # + magasin de racines : générateur (test_roots2c.py), recherche (test_roots_store),
                    #   rappel contre mbedTLS (test_roots_ca_cb, exige PICO_SDK_PATH ou MBEDTLS_DIR)
 ```
@@ -166,7 +195,11 @@ Prérequis : Wi-Fi provisionné une fois avec `screen /dev/ttyACM0 115200` et
 
 ```
 src/at_modem.[ch]     cœur portable : parseur AT/Hayes, tampon RX, +IPD, +++
-src/net_pico.[ch]     Wi-Fi (cyw43), TCP/TLS (altcp + mbedTLS), DNS/SNTP/ping, flash, watchdog/diagnostic
+src/net_pico.[ch]     Wi-Fi (cyw43), TCP/TLS (altcp + mbedTLS), UDP, DNS/SNTP/ping, flash, watchdog/diagnostic
+src/ap_pico.[ch]      point d'accès de configuration (cyw43 + lwIP) : ouverture, fermeture, HTTP
+src/dhcp_server.[ch]  serveur DHCP du point d'accès (portable, testé sur PC)
+src/dns_catchall.[ch] DNS captif du point d'accès (portable, testé sur PC)
+src/web_setup.[ch]    page de configuration : HTTP, formulaire, portail captif (portable, testé sur PC)
 src/tls_date.[ch]     date civile sans gmtime_r (vérification des dates de certificats)
 src/mbedtls_config.h  configuration mbedTLS (client TLS 1.2)
 certs/roots.pem       racines de confiance (magasin Mozilla) ; tools/roots2c.py les compile

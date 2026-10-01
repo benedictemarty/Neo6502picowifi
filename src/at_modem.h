@@ -72,10 +72,13 @@ struct at_config {
     uint16_t listen_port;   /* 0 = pas d'écoute (AT+CIPSERVER / ATS0)        */
     uint8_t  s0;            /* réponse automatique (sonneries)               */
     uint16_t tls_ports[AT_TLS_PORTS_MAX]; /* AT+TLSPORT : CIPSTART "TCP" → TLS */
+    char     ap_pass[AT_PASS_MAX + 1];    /* AT+APSETUPPWD : point d'accès de configuration */
 };
 
-#define AT_CONFIG_MAGIC    0x4E574D32u /* 'NWM2' */
+#define AT_CONFIG_MAGIC    0x4E574D33u /* 'NWM3' */
+#define AT_CONFIG_MAGIC_V2 0x4E574D32u /* 'NWM2' : même préfixe, sans ap_pass   */
 #define AT_CONFIG_MAGIC_V1 0x4E574D31u /* 'NWM1' : même préfixe, sans tls_ports */
+#define AT_AP_PASS_DEFAULT "neo6502wifi"  /* documenté dans le README (US-W6) */
 
 /* Rappel d'énumération Wi-Fi : ecn (0 open, 2 WPA, 3 WPA2, 4 WPA/WPA2). */
 typedef void (*at_scan_cb)(void *ctx, int ecn, const char *ssid, int rssi);
@@ -119,6 +122,10 @@ struct at_modem_ops {
     const char *(*build)(void *ctx);      /* ATI : identifiant de build, git describe (NULL = rien) */
     const char *(*build_date)(void *ctx); /* AT+GMR « compile time » : date du commit (NULL = unknown) */
     int  (*udp_connect)(void *ctx, const char *host, uint16_t port); /* NULL = UDP non supporté */
+    /* Point d'accès de configuration (US-W6) : on = 1 ouvre, 0 ferme ; renvoie
+       AT_NET_OK. ap_setup_ssid : SSID si ouvert, NULL si fermé. NULL = absent. */
+    int  (*ap_setup)(void *ctx, int on);
+    const char *(*ap_setup_ssid)(void *ctx);
 };
 
 /* Vrai si le port est dans la liste AT+TLSPORT. */

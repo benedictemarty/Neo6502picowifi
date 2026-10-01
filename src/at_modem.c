@@ -159,6 +159,7 @@ void at_modem_config_defaults(struct at_config *cfg)
     cfg->sntp_enable = 0;
     cfg->sntp_tz = 0;
     strcpy(cfg->sntp_server, "pool.ntp.org");
+    strcpy(cfg->ap_pass, AT_AP_PASS_DEFAULT);
 }
 
 static bool has_tls(struct at_modem *m)
@@ -173,6 +174,17 @@ bool at_modem_port_is_tls(const struct at_config *cfg, uint16_t port)
     return false;
 }
 
+/* Phrase de passe WPA2 : 8 à 63 caractères ASCII imprimables. */
+static bool ap_pass_valid(const char *pw)
+{
+    size_t n = 0;
+    while (n <= AT_PASS_MAX && pw[n]) n++;     /* borné : champ venu de la flash */
+    if (n < 8 || n > 63) return false;
+    for (size_t i = 0; i < n; i++)
+        if ((unsigned char)pw[i] < 0x20 || (unsigned char)pw[i] > 0x7e) return false;
+    return true;
+}
+
 static void save(struct at_modem *m)
 {
     if (m->ops->config_save) m->ops->config_save(m->ops->ctx, &m->cfg);
@@ -185,10 +197,14 @@ void at_modem_init(struct at_modem *m, const struct at_modem_ops *ops,
     m->ops = ops;
     if (cfg && cfg->magic == AT_CONFIG_MAGIC) {
         m->cfg = *cfg;
-    } else if (cfg && cfg->magic == AT_CONFIG_MAGIC_V1) {
-        /* migration v1 → v2 : les champs ajoutés (tls_ports) sont remis à zéro */
+        m->cfg.ap_pass[AT_PASS_MAX] = 0;
+        if (!ap_pass_valid(m->cfg.ap_pass)) strcpy(m->cfg.ap_pass, AT_AP_PASS_DEFAULT);
+    } else if (cfg && (cfg->magic == AT_CONFIG_MAGIC_V2 || cfg->magic == AT_CONFIG_MAGIC_V1)) {
+        /* migration v1/v2 → v3 : les champs ajoutés prennent leur valeur par
+           défaut (tls_ports à zéro en v1, ap_pass) ; le reste est conservé */
         m->cfg = *cfg;
-        memset(m->cfg.tls_ports, 0, sizeof m->cfg.tls_ports);
+        if (cfg->magic == AT_CONFIG_MAGIC_V1) memset(m->cfg.tls_ports, 0, sizeof m->cfg.tls_ports);
+        strcpy(m->cfg.ap_pass, AT_AP_PASS_DEFAULT);
         m->cfg.magic = AT_CONFIG_MAGIC;
     } else {
         at_modem_config_defaults(&m->cfg);
@@ -319,6 +335,11 @@ static bool hayes(struct at_modem *m, const char *cmd)
         if (m->ops->build) outf(m, "build: %s\r\n", m->ops->build(m->ops->ctx));
         if (m->ops->boot_info) outf(m, "%s\r\n", m->ops->boot_info(m->ops->ctx));
         outf(m, "saved SSID: \"%s\"%s\r\n", m->cfg.ssid, m->cfg.echo ? "" : " (echo off)");
+        if (m->ops->ap_setup_ssid) {
+            const char *ap = m->ops->ap_setup_ssid(m->ops->ctx);
+            if (ap) outf(m, "setup AP: \"%s\", password \"%s\", http://192.168.4.1/\r\n", ap, m->cfg.ap_pass);
+            else out(m, "setup AP: off\r\n");
+        }
         if (has_tls(m)) {
             out(m, m->ops->tls_info(m->ops->ctx));   /* peut dépasser le tampon d'outf */
             out(m, "\r\n");
@@ -372,6 +393,25 @@ static void plus_command(struct at_modem *m, const char *cmd)
     } else if (!strcmp(cmd, "RST")) {
         ok(m);
         m->ops->reset(m->ops->ctx);
+    } else if (!strcmp(cmd, "APSETUP?")) {
+        /* US-W6 : point d'accès de configuration (page web) */
+        const char *ap = m->ops->ap_setup_ssid ? m->ops->ap_setup_ssid(m->ops->ctx) : NULL;
+        if (!m->ops->ap_setup) { error(m); return; }
+        if (ap) outf(m, "+APSETUP:1,\"%s\"\r\n", ap); else out(m, "+APSETUP:0\r\n");
+        ok(m);
+    } else if (starts(cmd, "APSETUP=", &p)) {
+        if (!m->ops->ap_setup || !parse_int(&p, &v) || (v != 0 && v != 1)) { error(m); return; }
+        if (m->ops->ap_setup(m->ops->ctx, (int)v) == AT_NET_OK) ok(m); else error(m);
+    } else if (!strcmp(cmd, "APSETUPPWD?")) {
+        outf(m, "+APSETUPPWD:\"%s\"\r\n", m->cfg.ap_pass);
+        ok(m);
+    } else if (starts(cmd, "APSETUPPWD=", &p)) {
+        /* WPA2 : 8 à 63 caractères ; persistant, pris en compte à la prochaine ouverture */
+        char pw[AT_PASS_MAX + 1];
+        if (!parse_quoted(&p, pw, sizeof pw) || !ap_pass_valid(pw)) { error(m); return; }
+        strcpy(m->cfg.ap_pass, pw);
+        save(m);
+        ok(m);
     } else if (!strcmp(cmd, "BOOTSEL")) {
         if (!m->ops->bootsel) { error(m); return; }
         ok(m);

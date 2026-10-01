@@ -72,10 +72,39 @@ Wi-Fi modem for the Neo6502 (stories US-T1 and US-T2 in `docs/BACKLOG.md`).
 | `AT+CIUPDATE` | `ERROR` (no OTA: reflash a UF2) |
 | `ATI` | identity (`modem X.Y.Z`), `build:` line (`git describe`: `vX.Y.Z` for a release, `vX.Y.Z-N-gSHA[-dirty]` otherwise), saved SSID, last reset cause (`power-on`, `AT+RST`, `AT+BOOTSEL (UF2 flash)`, `reboot (bootloader or debugger)`, `watchdog timeout, stage N`, `lwip assert: …`), `TLS:` line (stack, number of roots, root used by the last handshake (`last root:`), newlib heap (`heap:` used, peak, max), time, duration and cipher suite of the last handshake, `resumed`, verification flags, last lwIP/mbedTLS messages), `TLS ports:` |
 | `AT+BOOTSEL` | `OK` then switch to UF2 mode (`RPI-RP2`) without touching the button — specific to this firmware |
+| `AT+APSETUP=1` / `=0` / `?` | opens / closes the setup access point; `+APSETUP:1,"Neo6502-modem-XXXX"` or `+APSETUP:0` (see below) |
+| `AT+APSETUPPWD="…"` / `?` | access point password (8 to 63 printable ASCII characters, persistent); default `neo6502wifi` |
 
 Not supported (answers `ERROR`): `CIPMUX=1`, 5-parameter UDP form (local port, mode), `ATO`/`ATA` on a UDP link (`NO CARRIER`), access-point mode, TLS 1.3,
 client certificate, ESP transparent mode (`CIPMODE=1`; use `ATDT` instead —
 `ATDT` also does TLS towards a port listed in `AT+TLSPORT`).
+
+## Setting up Wi-Fi from a phone
+
+No PC nor `netsetup` needed: the modem opens a **setup access point**
+
+- automatically at boot when **no network is saved**;
+- automatically when the saved network is still **unreachable 60 s** after boot;
+- on request with `AT+APSETUP=1`.
+
+1. On the phone, join the **`Neo6502-modem-XXXX`** network (XXXX = end of the MAC
+   address), password **`neo6502wifi`** (can be changed with `AT+APSETUPPWD`).
+2. The page opens by itself (captive portal); otherwise browse to **http://192.168.4.1/**.
+3. Pick the network from the list (or type its name), enter its password, then
+   **Enregistrer et se connecter** (save and connect; the page is in French). The
+   network is saved as with `AT+CWJAP_DEF`.
+4. On success the page shows the IP address obtained and the access point closes
+   15 s later; on failure (password refused, network not found) the page says so and
+   stays available.
+
+The access point also closes after **10 min without any request**; to reopen it,
+restart the modem or send `AT+APSETUP=1`. AT commands keep working meanwhile; `ATI`
+shows a `setup AP:` line (SSID, password, address).
+
+Security: the default password is public (it is written here); anyone in range can
+join the access point while it is open. The page never shows the saved network's
+password. The DHCP server, captive DNS and web page only listen on the access point
+interface (not on the home network).
 
 ## TLS
 
@@ -143,6 +172,7 @@ the value in `netsetup.pas`).
 
 ```
 make -C tests      # modem core (test_at_modem) + TLS dates (test_tls_date) on the PC, gcc + ASan/UBSan
+                   # + setup access point: DHCP and captive DNS (test_dhcp_server), page (test_web_setup)
                    # + root store: generator (test_roots2c.py), lookup (test_roots_store),
                    #   callback against mbedTLS (test_roots_ca_cb, needs PICO_SDK_PATH or MBEDTLS_DIR);
                    #   without mbedTLS that last test is SKIPPED with an explicit message
@@ -166,7 +196,11 @@ in the French documents.
 
 ```
 src/at_modem.[ch]     portable core: AT/Hayes parser, RX buffer, +IPD, +++
-src/net_pico.[ch]     Wi-Fi (cyw43), TCP/TLS (altcp + mbedTLS), DNS/SNTP/ping, flash, watchdog/diagnostics
+src/net_pico.[ch]     Wi-Fi (cyw43), TCP/TLS (altcp + mbedTLS), UDP, DNS/SNTP/ping, flash, watchdog/diagnostics
+src/ap_pico.[ch]      setup access point (cyw43 + lwIP): opening, closing, HTTP
+src/dhcp_server.[ch]  access point DHCP server (portable, tested on the PC)
+src/dns_catchall.[ch] access point captive DNS (portable, tested on the PC)
+src/web_setup.[ch]    setup page: HTTP, form, captive portal (portable, tested on the PC)
 src/tls_date.[ch]     civil date without gmtime_r (certificate date checks)
 src/mbedtls_config.h  mbedTLS configuration (TLS 1.2 client)
 certs/roots.pem       trust roots (Mozilla store); tools/roots2c.py compiles them

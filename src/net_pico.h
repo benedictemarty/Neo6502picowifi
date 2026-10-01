@@ -16,6 +16,18 @@ void net_pico_stage(uint32_t stage);
 /* Reconnexion de fond au SSID mémorisé (au boot, et après AT+CWJAP réussi). */
 void net_pico_background_join(bool enable);   /* point d'étape pour le diagnostic watchdog */
 
+/* Point d'accès de configuration (ap_pico.c) : modem courant, et passage au
+   réseau mémorisé (quitte le réseau actuel, reconnexion de fond immédiate). */
+struct at_modem *net_pico_modem(void);
+void net_pico_join_saved(void);
+const char *net_pico_joined_ssid(void);   /* "" tant que non associé */
+bool net_pico_ready(void);                /* puce Wi-Fi initialisée   */
+/* Recherche des réseaux sans attente : start, puis busy jusqu'à false,
+   puis results (triés par RSSI décroissant). */
+bool net_pico_scan_start(void);
+bool net_pico_scan_busy(void);
+void net_pico_scan_results(at_scan_cb cb, void *cb_ctx);
+
 /* Configuration persistante en flash (dernier secteur). */
 void config_flash_load(struct at_config *cfg);
 void config_flash_save(void *ctx, const struct at_config *cfg);

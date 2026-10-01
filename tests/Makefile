@@ -11,8 +11,10 @@ MBED_CFLAGS = -std=c11 -g -O1 -fsanitize=address,undefined -I. -I$(MBEDTLS_DIR)/
 MBED_SRCS = $(wildcard $(MBEDTLS_DIR)/library/*.c)
 MBED_OBJS = $(patsubst $(MBEDTLS_DIR)/library/%.c,mbedtls-host/%.o,$(MBED_SRCS))
 
-test: test_at_modem test_tls_date test_reset_cause test_roots_store test_roots2c test_version test_roots_ca_cb_run
+test: test_at_modem test_dhcp_server test_web_setup test_tls_date test_reset_cause test_roots_store test_roots2c test_version test_roots_ca_cb_run
 	./test_at_modem
+	./test_dhcp_server
+	./test_web_setup
 	./test_tls_date
 	./test_reset_cause
 	./test_roots_store
@@ -25,6 +27,12 @@ test_version:
 
 test_tls_date: test_tls_date.c ../src/tls_date.c ../src/tls_date.h
 	$(CC) $(CFLAGS) -o $@ test_tls_date.c ../src/tls_date.c
+
+test_dhcp_server: test_dhcp_server.c ../src/dhcp_server.c ../src/dhcp_server.h ../src/dns_catchall.c ../src/dns_catchall.h
+	$(CC) $(CFLAGS) -o $@ test_dhcp_server.c ../src/dhcp_server.c ../src/dns_catchall.c
+
+test_web_setup: test_web_setup.c ../src/web_setup.c ../src/web_setup.h
+	$(CC) $(CFLAGS) -o $@ test_web_setup.c ../src/web_setup.c
 
 test_reset_cause: test_reset_cause.c ../src/reset_cause.c ../src/reset_cause.h
 	$(CC) $(CFLAGS) -o $@ test_reset_cause.c ../src/reset_cause.c
@@ -62,6 +70,6 @@ test_roots_ca_cb_run:
 endif
 
 clean:
-	rm -rf test_at_modem test_tls_date test_reset_cause test_roots_store test_roots_ca_cb roots_gen.c roots_fixture_gen.c mbedtls-host
+	rm -rf test_at_modem test_dhcp_server test_web_setup test_tls_date test_reset_cause test_roots_store test_roots_ca_cb roots_gen.c roots_fixture_gen.c mbedtls-host
 
 .PHONY: test test_roots2c test_version test_roots_ca_cb_run clean

@@ -36,6 +36,10 @@ add_executable(picow_modem
     src/roots_store.c
     src/roots_ca_cb.c
     src/usb_descriptors.c
+    src/ap_pico.c
+    src/dhcp_server.c
+    src/dns_catchall.c
+    src/web_setup.c
     ${CMAKE_CURRENT_BINARY_DIR}/roots_gen.c
 )
 # identifiant de build (git describe), recalculé à chaque compilation

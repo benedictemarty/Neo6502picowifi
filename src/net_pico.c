@@ -10,6 +10,7 @@
 #include "tls_date.h"
 #include "roots_ca_cb.h"
 #include "reset_cause.h"
+#include "ap_pico.h"
 
 #include <malloc.h>
 #include <stdarg.h>
@@ -61,6 +62,7 @@ static struct at_modem *modem;
 static volatile bool dns_done;
 static ip_addr_t dns_result;
 static char joined_ssid[AT_SSID_MAX + 1];
+static bool wifi_ready;                 /* cyw43 initialisé */
 static uint32_t last_ring_ms;
 static volatile time_t sntp_epoch;     /* dernier temps SNTP reçu (0 = aucun) */
 static volatile uint32_t sntp_at_ms;
@@ -214,6 +216,23 @@ static int wifi_join(void *ctx, const char *ssid, const char *pass)
     return seen_nonet ? AT_NET_NO_AP : AT_NET_TIMEOUT;
 }
 
+struct at_modem *net_pico_modem(void) { return modem; }
+const char *net_pico_joined_ssid(void) { return joined_ssid; }
+
+void net_pico_join_saved(void)
+{
+    bg_enabled = false;
+    cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
+    joined_ssid[0] = 0;
+    /* attendre la fin de l'ancienne association : sinon la reconnexion de fond
+       prendrait l'ancien lien encore « UP » pour le nouveau réseau */
+    uint32_t t0 = to_ms_since_boot(get_absolute_time());
+    while (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP
+           && to_ms_since_boot(get_absolute_time()) - t0 < 2000) wait_ms(10);
+    bg_was_up = false;
+    net_pico_background_join(true);
+}
+
 static void wifi_leave(void *ctx)
 {
     (void)ctx;
@@ -266,23 +285,39 @@ static int scan_result(void *env, const cyw43_ev_scan_result_t *r)
     return 0;
 }
 
+/* Recherche en deux temps : AT+CWLAP attend la fin, le point d'accès de
+   configuration (ap_pico.c) l'interroge sans bloquer la boucle principale. */
+static struct scan_ctx scan_s;
+
+bool net_pico_scan_start(void)
+{
+    if (cyw43_wifi_scan_active(&cyw43_state)) return false;
+    memset(&scan_s, 0, sizeof scan_s);
+    cyw43_wifi_scan_options_t opts = { 0 };
+    return cyw43_wifi_scan(&cyw43_state, &opts, &scan_s, scan_result) == 0;
+}
+
+bool net_pico_scan_busy(void) { return cyw43_wifi_scan_active(&cyw43_state); }
+
+void net_pico_scan_results(at_scan_cb cb, void *cb_ctx)
+{
+    struct scan_ctx *s = &scan_s;
+    /* tri par RSSI décroissant (comme AT+CWLAPOPT=1,…) */
+    for (int i = 1; i < s->n; i++)
+        for (int j = i; j > 0 && s->ap[j].rssi > s->ap[j - 1].rssi; j--) {
+            typeof(s->ap[0]) t = s->ap[j]; s->ap[j] = s->ap[j - 1]; s->ap[j - 1] = t;
+        }
+    for (int i = 0; i < s->n; i++) cb(cb_ctx, s->ap[i].ecn, s->ap[i].ssid, s->ap[i].rssi);
+}
+
 static int wifi_scan(void *ctx, at_scan_cb cb, void *cb_ctx)
 {
     (void)ctx;
-    static struct scan_ctx s;
-    memset(&s, 0, sizeof s);
-    s.cb = cb; s.cb_ctx = cb_ctx;
-    cyw43_wifi_scan_options_t opts = { 0 };
-    if (cyw43_wifi_scan(&cyw43_state, &opts, &s, scan_result) != 0) return AT_NET_FAIL;
+    if (!net_pico_scan_start()) return AT_NET_FAIL;
     uint32_t t0 = to_ms_since_boot(get_absolute_time());
-    while (cyw43_wifi_scan_active(&cyw43_state) && to_ms_since_boot(get_absolute_time()) - t0 < 15000)
+    while (net_pico_scan_busy() && to_ms_since_boot(get_absolute_time()) - t0 < 15000)
         wait_ms(50);
-    /* tri par RSSI décroissant (comme AT+CWLAPOPT=1,…) */
-    for (int i = 1; i < s.n; i++)
-        for (int j = i; j > 0 && s.ap[j].rssi > s.ap[j - 1].rssi; j--) {
-            typeof(s.ap[0]) t = s.ap[j]; s.ap[j] = s.ap[j - 1]; s.ap[j - 1] = t;
-        }
-    for (int i = 0; i < s.n; i++) cb(cb_ctx, s.ap[i].ecn, s.ap[i].ssid, s.ap[i].rssi);
+    net_pico_scan_results(cb, cb_ctx);
     return AT_NET_OK;
 }
 
@@ -350,6 +385,8 @@ static bool resolve(const char *host, ip_addr_t *out)
  * dans tls_verify_cb (heure SNTP exigée), ticket de session réutilisé pour
  * le même hôte:port (prophet.neo ouvre une connexion par bloc « Range »).
  */
+
+bool net_pico_ready(void) { return wifi_ready; }
 
 static struct altcp_tls_config *tls_conf;
 static bool tls_conf_verify_set;
@@ -884,6 +921,7 @@ struct at_modem_ops net_pico_ops = {
     .config_save = config_flash_save, .sntp_time = sntp_time_op, .ping = ping_op,
     .reset = reset_op, .bootsel = bootsel_op, .version = version_op, .build = build_op, .build_date = build_date_op, .tls_info = tls_info_op, .tls_selftest = tls_selftest_op,
     .udp_connect = udp_connect_op,
+    .ap_setup = ap_pico_setup, .ap_setup_ssid = ap_pico_ssid,
 };
 
 bool net_pico_init(struct at_modem *m)
@@ -891,12 +929,14 @@ bool net_pico_init(struct at_modem *m)
     modem = m;
     if (cyw43_arch_init_with_country(CYW43_COUNTRY_FRANCE) != 0) return false;
     cyw43_arch_enable_sta_mode();
+    wifi_ready = true;
     return true;
 }
 
 void net_pico_poll(void)
 {
     bg_poll();
+    if (wifi_ready) ap_pico_poll();
     /* sonnerie répétée tant que l'appel entrant n'est pas décroché */
     if (pending_pcb && to_ms_since_boot(get_absolute_time()) - last_ring_ms >= RING_PERIOD_MS) {
         last_ring_ms = to_ms_since_boot(get_absolute_time());

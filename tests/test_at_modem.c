@@ -26,6 +26,7 @@ static struct {
     int resets;
     int sends;                   /* appels à tcp_send (un datagramme en UDP) */
     bool last_udp;
+    bool ap_on;
     struct at_config saved_cfg;
 } M;
 
@@ -48,6 +49,8 @@ static int mconn(void *c, const char *h, uint16_t p, bool tls) {
     M.tcp_up = (M.connect_result == AT_NET_OK); return M.connect_result; }
 static const char *mtls(void *c) { (void)c; return M.no_tls ? NULL : "TLS: test 1.2, root: Test Root, time: synced"; }
 static int msend(void *c, const uint8_t *d, size_t n) { (void)c; memcpy(M.sent + M.sent_len, d, n); M.sent_len += n; M.sends++; return AT_NET_OK; }
+static int map(void *c, int on) { (void)c; M.ap_on = on; return AT_NET_OK; }
+static const char *mapssid(void *c) { (void)c; return M.ap_on ? "Neo6502-modem-1122" : NULL; }
 static int mudp(void *c, const char *h, uint16_t p) {
     (void)c; strcpy(M.last_host, h); M.last_port = p; M.last_udp = true;
     M.tcp_up = (M.connect_result == AT_NET_OK); return M.connect_result; }
@@ -65,7 +68,7 @@ static const char *mver(void *c) { (void)c; return "0.1.0"; }
 
 static const struct at_modem_ops ops = {
     NULL, mw, mms, mjoin, mleave, mwifi, mscan, minfo, mconn, msend, mclose, mtcp,
-    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL, mtls, NULL, NULL, NULL, mudp,
+    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL, mtls, NULL, NULL, NULL, mudp, map, mapssid,
 };
 
 static struct at_modem modem;
@@ -489,6 +492,16 @@ static void test_config_persist(void)
     cfg.tls_ports[0] = 443;
     at_modem_init(&modem, &ops, &cfg);
     CHECK(!strcmp(modem.cfg.ssid, "Reseau") && modem.cfg.tls_ports[0] == 0 && modem.cfg.magic == AT_CONFIG_MAGIC);
+    CHECK(!strcmp(modem.cfg.ap_pass, AT_AP_PASS_DEFAULT));
+    cfg.magic = AT_CONFIG_MAGIC_V2;           /* flash v2 : tout conservé, ap_pass par défaut */
+    cfg.tls_ports[0] = 443;
+    memset(cfg.ap_pass, 0xff, sizeof cfg.ap_pass);   /* octets de flash effacée */
+    at_modem_init(&modem, &ops, &cfg);
+    CHECK(!strcmp(modem.cfg.ssid, "Reseau") && modem.cfg.tls_ports[0] == 443 && modem.cfg.magic == AT_CONFIG_MAGIC);
+    CHECK(!strcmp(modem.cfg.ap_pass, AT_AP_PASS_DEFAULT));
+    cfg.magic = AT_CONFIG_MAGIC;              /* v3 abîmée : mot de passe invalide → défaut */
+    at_modem_init(&modem, &ops, &cfg);
+    CHECK(!strcmp(modem.cfg.ap_pass, AT_AP_PASS_DEFAULT));
     cfg.magic = 0;                            /* flash vierge : défauts */
     at_modem_init(&modem, &ops, &cfg);
     CHECK(modem.cfg.ssid[0] == 0 && modem.cfg.echo == 1);
@@ -626,6 +639,42 @@ static void test_udp(void)
     send("AT+CIPSTATUS\r\n"); CHECK_OUT("\"TCP\""); clear_out();
 }
 
+/* US-W6 : point d'accès de configuration */
+static void test_ap_setup(void)
+{
+    reset_mock();
+    send("ATE0\r\n"); clear_out();
+    send("AT+APSETUP?\r\n"); CHECK_OUT("+APSETUP:0\r\n"); CHECK_OUT("OK"); clear_out();
+    send("ATI\r\n"); CHECK_OUT("setup AP: off\r\n"); clear_out();
+    send("AT+APSETUP=1\r\n"); CHECK_OUT("OK"); CHECK(M.ap_on); clear_out();
+    send("AT+APSETUP?\r\n"); CHECK_OUT("+APSETUP:1,\"Neo6502-modem-1122\"\r\n"); clear_out();
+    send("ATI\r\n");
+    CHECK_OUT("setup AP: \"Neo6502-modem-1122\", password \"" AT_AP_PASS_DEFAULT "\", http://192.168.4.1/\r\n");
+    clear_out();
+    send("AT+APSETUP=0\r\n"); CHECK_OUT("OK"); CHECK(!M.ap_on); clear_out();
+    send("AT+APSETUP=2\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+APSETUP=x\r\n"); CHECK_OUT("ERROR"); clear_out();
+
+    /* mot de passe : 8 à 63 caractères, persistant */
+    send("AT+APSETUPPWD?\r\n"); CHECK_OUT("+APSETUPPWD:\"" AT_AP_PASS_DEFAULT "\""); clear_out();
+    int saved = M.saved;
+    send("AT+APSETUPPWD=\"court\"\r\n"); CHECK_OUT("ERROR"); CHECK(M.saved == saved); clear_out();
+    send("AT+APSETUPPWD=\"0123456789012345678901234567890123456789012345678901234567890123\"\r\n");
+    CHECK_OUT("ERROR"); clear_out();                                            /* 64 caractères */
+    send("AT+APSETUPPWD=\"mon secret\"\r\n"); CHECK_OUT("OK");
+    CHECK(M.saved == saved + 1 && !strcmp(M.saved_cfg.ap_pass, "mon secret")); clear_out();
+    send("AT+APSETUPPWD?\r\n"); CHECK_OUT("+APSETUPPWD:\"mon secret\""); clear_out();
+
+    /* plateforme sans point d'accès : ERROR, pas de ligne dans ATI */
+    struct at_modem_ops no_ap = ops;
+    no_ap.ap_setup = NULL;
+    no_ap.ap_setup_ssid = NULL;
+    at_modem_init(&modem, &no_ap, NULL);
+    send("AT+APSETUP=1\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+APSETUP?\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("ATI\r\n"); CHECK_NOT_OUT("setup AP"); clear_out();
+}
+
 int main(void)
 {
     test_basic();
@@ -634,6 +683,7 @@ int main(void)
     test_prophet_http();
     test_rx_ring();
     test_udp();
+    test_ap_setup();
     test_hayes();
     test_tls();
     test_config_persist();
