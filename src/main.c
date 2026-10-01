@@ -102,15 +102,17 @@ int main(void)
     irq_set_enabled(UART0_IRQ, true);
     uart_set_irq_enables(UART_ID, true, false);
 
-    tusb_init();
-    tnfs_pico_init();
-
     struct at_config cfg;
     config_flash_load(&cfg);
     net_pico_ops.write = serial_write;
     net_pico_ops.millis = millis;
     net_pico_ops.boot_info = boot_info_op;
     at_modem_init(&modem, &net_pico_ops, &cfg);
+
+    /* second port USB TNFS seulement si AT$TNFSUSB=1 (config validée par at_modem_init) */
+    usb_descriptors_tnfs(modem.cfg.tnfs_usb == 1);
+    tusb_init();
+    tnfs_pico_init();
 
     bool wifi_ok = net_pico_init(&modem);
     if (!wifi_ok) {

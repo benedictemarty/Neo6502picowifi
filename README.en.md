@@ -74,6 +74,7 @@ Wi-Fi modem for the Neo6502 (stories US-T1 and US-T2 in `docs/BACKLOG.md`).
 | `AT+BOOTSEL` | `OK` then switch to UF2 mode (`RPI-RP2`) without touching the button — specific to this firmware |
 | `AT+APSETUP=1` / `=0` / `?` | opens / closes the setup access point; `+APSETUP:1,"Neo6502-modem-XXXX"` or `+APSETUP:0` (see below) |
 | `AT$TNFS="host",port` / `=host:port` / `=host` / `=0` / `?` | TNFS server of the second USB port (port 16384 by default, persistent); `$TNFS:"host",port`; `=0` clears; same command as PicoWiFiModemUSB |
+| `AT$TNFSUSB=1` / `=0` / `?` | second TNFS USB port present / absent (**default: absent**), persistent, applied at the next boot (`AT+RST`) |
 | `AT&W` | `OK` (the configuration is already saved by every command) |
 | `AT+APSETUPPWD="…"` / `?` | access point password (8 to 63 printable ASCII characters, persistent); default `neo6502wifi` |
 
@@ -83,8 +84,10 @@ client certificate, ESP transparent mode (`CIPMODE=1`; use `ATDT` instead —
 
 ## Second USB port: TNFS
 
-The modem is a composite USB device with **two serial ports** (CDC-ACM, VID:PID
-`2E8A:000A`, product "Pico W Wi-Fi modem", manufacturer "Neo6502drive"):
+**Disabled by default**: the modem then stays a single USB serial port, identical to
+0.3.x. `AT$TNFSUSB=1` then `AT+RST` turn it into a composite USB device with **two serial
+ports** (CDC-ACM, VID:PID `2E8A:000A`, product "Pico W Wi-Fi modem", manufacturer
+"Neo6502drive"):
 
 | Interfaces | Name | Role | Linux |
 |---|---|---|---|
@@ -100,6 +103,11 @@ one frame. This UDP link is **independent from the AT link**: a Minitel/Telnet s
 during DNS resolution, or with the TNFS port closed (DTR): nothing is sent back, the TNFS
 client handles its own timeouts. Format agreed with reload-emulator and Neo6502TeleStrat
 (reload's `src/devices/neo_tnfs.h` client). No TNFS over the UART.
+
+Neo6502 limit: the RP2040 USB host only has **15 endpoints for all devices**; the
+second port adds 3 (7 instead of 4). With a hub, two HID devices and a USB stick (10
+endpoints measured on the board), the TNFS port would not fit and would be skipped (the
+AT port, interface 0, stays mounted). Analysis of Trinity 0.16.68, not tried on the board.
 
 ## Setting up Wi-Fi from a phone
 

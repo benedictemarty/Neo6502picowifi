@@ -161,6 +161,7 @@ void at_modem_config_defaults(struct at_config *cfg)
     strcpy(cfg->sntp_server, "pool.ntp.org");
     strcpy(cfg->ap_pass, AT_AP_PASS_DEFAULT);
     cfg->tnfs_port = 16384;
+    cfg->tnfs_usb = 0;      /* appareil USB identique à la 0.3.x tant qu'on ne l'active pas */
 }
 
 static bool has_tls(struct at_modem *m)
@@ -202,6 +203,7 @@ void at_modem_init(struct at_modem *m, const struct at_modem_ops *ops,
         if (!ap_pass_valid(m->cfg.ap_pass)) strcpy(m->cfg.ap_pass, AT_AP_PASS_DEFAULT);
         m->cfg.tnfs_host[AT_HOST_MAX] = 0;
         if (!m->cfg.tnfs_port) m->cfg.tnfs_port = 16384;
+        if (m->cfg.tnfs_usb > 1) m->cfg.tnfs_usb = 0;
     } else if (cfg && (cfg->magic == AT_CONFIG_MAGIC_V2 || cfg->magic == AT_CONFIG_MAGIC_V1)) {
         /* migration v1/v2 → v3 : les champs ajoutés prennent leur valeur par
            défaut (tls_ports à zéro en v1, ap_pass) ; le reste est conservé */
@@ -210,6 +212,7 @@ void at_modem_init(struct at_modem *m, const struct at_modem_ops *ops,
         strcpy(m->cfg.ap_pass, AT_AP_PASS_DEFAULT);
         memset(m->cfg.tnfs_host, 0, sizeof m->cfg.tnfs_host);
         m->cfg.tnfs_port = 16384;
+        m->cfg.tnfs_usb = 0;
         m->cfg.magic = AT_CONFIG_MAGIC;
     } else {
         at_modem_config_defaults(&m->cfg);
@@ -345,8 +348,9 @@ static bool hayes(struct at_modem *m, const char *cmd)
             if (ap) outf(m, "setup AP: \"%s\", password \"%s\", http://192.168.4.1/\r\n", ap, m->cfg.ap_pass);
             else out(m, "setup AP: off\r\n");
         }
-        if (m->cfg.tnfs_host[0]) outf(m, "TNFS (USB port 2): %s:%u\r\n", m->cfg.tnfs_host, m->cfg.tnfs_port);
-        else out(m, "TNFS (USB port 2): off\r\n");
+        if (!m->cfg.tnfs_usb) out(m, "TNFS (USB port 2): disabled (AT$TNFSUSB=1)\r\n");
+        else if (m->cfg.tnfs_host[0]) outf(m, "TNFS (USB port 2): %s:%u\r\n", m->cfg.tnfs_host, m->cfg.tnfs_port);
+        else out(m, "TNFS (USB port 2): no server (AT$TNFS)\r\n");
         if (has_tls(m)) {
             out(m, m->ops->tls_info(m->ops->ctx));   /* peut dépasser le tampon d'outf */
             out(m, "\r\n");
@@ -640,7 +644,9 @@ static void plus_command(struct at_modem *m, const char *cmd)
 
 /* ------------------------------------------------------- ligne AT */
 
-/* AT$TNFS : serveur du second port USB (TNFS), commun avec PicoWiFiModemUSB.
+/* AT$TNFSUSB=0|1|? : second port USB TNFS désactivé (défaut) ou présent, au
+   prochain démarrage.
+   AT$TNFS : serveur du second port USB (TNFS), commun avec PicoWiFiModemUSB.
    AT$TNFS="hôte",port | AT$TNFS=hôte:port | AT$TNFS=hôte (port 16384)
    AT$TNFS=0 (efface) | AT$TNFS? → $TNFS:"hôte",port. Persistant. */
 static void dollar_command(struct at_modem *m, const char *cmd)
@@ -648,6 +654,20 @@ static void dollar_command(struct at_modem *m, const char *cmd)
     const char *p;
     char host[AT_HOST_MAX + 1];
     long port = 16384;
+    if (!strcmp(cmd, "TNFSUSB?")) {
+        outf(m, "$TNFSUSB:%u\r\n", m->cfg.tnfs_usb);
+        ok(m);
+        return;
+    }
+    if (starts(cmd, "TNFSUSB=", &p)) {
+        /* second port USB : pris en compte au prochain démarrage (AT+RST) */
+        long v;
+        if (!parse_int(&p, &v) || (v != 0 && v != 1) || *p) { error(m); return; }
+        m->cfg.tnfs_usb = (uint8_t)v;
+        save(m);
+        ok(m);
+        return;
+    }
     if (!strcmp(cmd, "TNFS?")) {
         if (m->cfg.tnfs_host[0]) outf(m, "$TNFS:\"%s\",%u\r\n", m->cfg.tnfs_host, m->cfg.tnfs_port);
         else out(m, "$TNFS:\"\",0\r\n");

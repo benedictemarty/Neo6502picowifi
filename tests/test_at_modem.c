@@ -682,7 +682,15 @@ static void test_tnfs_config(void)
     send("ATE0\r\n"); clear_out();
     CHECK(modem.cfg.tnfs_port == 16384 && modem.cfg.tnfs_host[0] == 0);
     send("AT$TNFS?\r\n"); CHECK_OUT("$TNFS:\"\",0\r\n"); CHECK_OUT("OK"); clear_out();
-    send("ATI\r\n"); CHECK_OUT("TNFS (USB port 2): off\r\n"); clear_out();
+    send("ATI\r\n"); CHECK_OUT("TNFS (USB port 2): disabled (AT$TNFSUSB=1)\r\n"); clear_out();
+    /* second port USB : désactivé par défaut, activé par AT$TNFSUSB=1 (persistant) */
+    CHECK(modem.cfg.tnfs_usb == 0);
+    send("AT$TNFSUSB?\r\n"); CHECK_OUT("$TNFSUSB:0\r\n"); CHECK_OUT("OK"); clear_out();
+    send("AT$TNFSUSB=2\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT$TNFSUSB=1x\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT$TNFSUSB=1\r\n"); CHECK_OUT("OK"); CHECK(M.saved_cfg.tnfs_usb == 1); clear_out();
+    send("AT$TNFSUSB?\r\n"); CHECK_OUT("$TNFSUSB:1\r\n"); clear_out();
+    send("ATI\r\n"); CHECK_OUT("TNFS (USB port 2): no server (AT$TNFS)\r\n"); clear_out();
     int saved = M.saved;
     send("AT$TNFS=\"tnfs.example\",16385\r\n"); CHECK_OUT("OK"); clear_out();
     CHECK(M.saved == saved + 1 && !strcmp(M.saved_cfg.tnfs_host, "tnfs.example") && M.saved_cfg.tnfs_port == 16385);
@@ -710,7 +718,12 @@ static void test_tnfs_config(void)
     strcpy(cfg.tnfs_host, "x");
     cfg.magic = AT_CONFIG_MAGIC_V2;
     at_modem_init(&modem, &ops, &cfg);
-    CHECK(modem.cfg.tnfs_host[0] == 0 && modem.cfg.tnfs_port == 16384);
+    CHECK(modem.cfg.tnfs_host[0] == 0 && modem.cfg.tnfs_port == 16384 && modem.cfg.tnfs_usb == 0);
+    cfg.magic = AT_CONFIG_MAGIC;              /* v3 abîmée : valeur hors domaine → désactivé */
+    cfg.tnfs_usb = 0xff;
+    at_modem_init(&modem, &ops, &cfg);
+    CHECK(modem.cfg.tnfs_usb == 0);
+    send("AT$TNFSUSB=0\r\n"); CHECK_OUT("OK"); CHECK(modem.cfg.tnfs_usb == 0); clear_out();
 }
 
 int main(void)

@@ -72,6 +72,7 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `AT+BOOTSEL` | `OK` puis passage en mode UF2 (`RPI-RP2`) sans toucher au bouton — spécifique à ce firmware |
 | `AT+APSETUP=1` / `=0` / `?` | ouvre / ferme le point d'accès de configuration ; `+APSETUP:1,"Neo6502-modem-XXXX"` ou `+APSETUP:0` (voir ci-dessous) |
 | `AT$TNFS="hôte",port` / `=hôte:port` / `=hôte` / `=0` / `?` | serveur TNFS du second port USB (port 16384 par défaut, persistant) ; `$TNFS:"hôte",port` ; `=0` efface ; commande commune avec PicoWiFiModemUSB |
+| `AT$TNFSUSB=1` / `=0` / `?` | second port USB TNFS présent / absent (**défaut : absent**), persistant, pris en compte au prochain démarrage (`AT+RST`) |
 | `AT&W` | `OK` (la configuration est déjà enregistrée à chaque commande) |
 | `AT+APSETUPPWD="…"` / `?` | mot de passe du point d'accès (8 à 63 caractères ASCII imprimables, persistant) ; défaut `neo6502wifi` |
 
@@ -81,8 +82,10 @@ TLS 1.3, certificat client, mode transparent ESP (`CIPMODE=1` ; utiliser
 
 ## Second port USB : TNFS
 
-Le modem est un périphérique USB composite à **deux ports série** (CDC-ACM, VID:PID
-`2E8A:000A`, produit « Pico W Wi-Fi modem », fabricant « Neo6502drive ») :
+**Désactivé par défaut** : le modem reste alors un seul port série USB, identique à la
+0.3.x. `AT$TNFSUSB=1` puis `AT+RST` en fait un périphérique USB composite à **deux ports
+série** (CDC-ACM, VID:PID `2E8A:000A`, produit « Pico W Wi-Fi modem », fabricant
+« Neo6502drive ») :
 
 | Interfaces | Nom | Rôle | Linux |
 |---|---|---|---|
@@ -98,6 +101,12 @@ en une trame. Ce lien UDP est **indépendant du lien AT** : une session Minitel/
 la résolution DNS, ou port TNFS fermé (DTR) : rien n'est renvoyé, le client TNFS gère ses
 délais. Format convenu avec reload-emulator et Neo6502TeleStrat (client
 `src/devices/neo_tnfs.h` de reload). Pas de TNFS sur l'UART.
+
+Limite côté Neo6502 : l'hôte USB du RP2040 n'a que **15 points de terminaison pour tous
+les appareils** ; le second port en ajoute 3 (7 au lieu de 4). Avec un hub, deux
+périphériques HID et une clé USB (10 points relevés sur carte), le port TNFS ne tiendrait
+pas et serait ignoré (le port AT, interface 0, reste monté). Analyse de Trinity 0.16.68,
+non essayée sur carte.
 
 ## Configuration du Wi-Fi depuis un téléphone
 

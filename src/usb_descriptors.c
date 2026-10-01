@@ -1,7 +1,10 @@
-/* usb_descriptors.c — descripteurs USB : périphérique composite, deux CDC-ACM
-   (IAD) : interfaces 0-1 « Modem AT » (inchangé), interfaces 2-3 « TNFS ». */
+/* usb_descriptors.c — descripteurs USB. Par défaut un seul CDC-ACM « Modem AT »
+   (interfaces 0-1, comme en 0.3.x) ; avec AT$TNFSUSB=1, un second CDC « TNFS »
+   (interfaces 2-3). L'hôte USB de la Neo6502 n'a que 15 points de
+   terminaison pour tous les appareils : le second port en prend 3 de plus. */
 #include "tusb.h"
 #include "pico/unique_id.h"
+#include "tnfs_pico.h"
 
 /* VID/PID de test Raspberry Pi (0x2E8A, PID 0x000A = « Pico SDK CDC ») */
 #define USB_VID 0x2E8A
@@ -33,18 +36,25 @@ enum { ITF_NUM_CDC = 0, ITF_NUM_CDC_DATA, ITF_NUM_TNFS, ITF_NUM_TNFS_DATA, ITF_N
 #define EPNUM_TNFS_NOTIF 0x83
 #define EPNUM_TNFS_OUT   0x04
 #define EPNUM_TNFS_IN    0x84
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + 2 * TUD_CDC_DESC_LEN)
+static const uint8_t desc_config_modem[] = {
+    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TNFS, 0, TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN, 0, 100),
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64),
+};
 
-static const uint8_t desc_configuration[] = {
-    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0, 100),
+static const uint8_t desc_config_tnfs[] = {
+    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, TUD_CONFIG_DESC_LEN + 2 * TUD_CDC_DESC_LEN, 0, 100),
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64),
     TUD_CDC_DESCRIPTOR(ITF_NUM_TNFS, 5, EPNUM_TNFS_NOTIF, 8, EPNUM_TNFS_OUT, EPNUM_TNFS_IN, 64),
 };
 
+static bool with_tnfs;
+
+void usb_descriptors_tnfs(bool enable) { with_tnfs = enable; }
+
 const uint8_t *tud_descriptor_configuration_cb(uint8_t index)
 {
     (void)index;
-    return desc_configuration;
+    return with_tnfs ? desc_config_tnfs : desc_config_modem;
 }
 
 static const char *string_desc[] = {

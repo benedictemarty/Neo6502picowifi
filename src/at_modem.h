@@ -75,6 +75,7 @@ struct at_config {
     char     ap_pass[AT_PASS_MAX + 1];    /* AT+APSETUPPWD : point d'accès de configuration */
     char     tnfs_host[AT_HOST_MAX + 1];  /* AT$TNFS : serveur du port USB TNFS ("" = aucun) */
     uint16_t tnfs_port;
+    uint8_t  tnfs_usb;      /* AT$TNFSUSB : 1 = second port USB TNFS (au démarrage) */
 };
 
 #define AT_CONFIG_MAGIC    0x4E574D33u /* 'NWM3' */
