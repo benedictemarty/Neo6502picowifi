@@ -29,6 +29,36 @@ fonctionner sans modification.
 |----|---|------------|------|
 | US-T14 | P1 | En tant qu'utilisateur d'un émulateur reload-emulator sur Neo6502, je veux que le modem gère **l'UDP au format ESP8266** (`AT+CIPSTART="UDP","hôte",port`, `AT+CIPSEND=n` = un datagramme, `+IPD,n:` = un datagramme reçu, `CIPMUX=0`), afin de monter un répertoire distant par **TNFS** (serveur `tnfsd`) sans firmware Pico W dédié ; compatible aussi avec un vrai MOD-WIFI-ESP8266 sur l'UEXT. **Critères d'acceptation** : (1) un `+IPD` par datagramme, jamais regroupés ni coupés ; (2) une réponse arrivée pendant `Recv`/`SEND OK` ou un `CIPSEND` en cours n'est pas perdue ; (3) datagrammes de 532 octets (TNFS) dans les deux sens, 1472 au plus ; (4) TCP, TLS et Hayes inchangés ; (5) sur carte : échange TNFS avec `tnfsd` depuis le PC puis depuis le Neo6502. | En cours — code et tests PC faits (2026-10-01, `b054568`) ; **validé de bout en bout sur PC contre `tnfsd`** par reload-emulator (2026-10-01 : `src/at_modem.c` non modifié, harnais pty + socket UDP connecté, client `neo_esp_at.h` de reload `3b06924` ; CLOAD cassette, Sedoric SAVE puis LOAD relu à l'identique ; 640 datagrammes reçus, 0 perdu, 0 `SEND FAIL`) ; reste l'essai sur le vrai Pico W (Wi-Fi, lwIP) |
 
+## Ajouts 2026-10-01 (services supplémentaires)
+Proposés après l'étude des besoins de NeoNavigator (rendu déporté NeoRFB, une connexion `ATDT`), Prophet,
+reload-emulator (TNFS) et des ressources libres du Pico W (flash ≈ 1,34 Mio, tas ≈ 139 Ko au pic TLS mesuré,
+cœur 1 inutilisé). Coûts = estimations, non mesurés.
+
+| ID | P | User story | État |
+|----|---|------------|------|
+| US-W6 | P1 | En tant que nouvel utilisateur, je veux **configurer le Wi-Fi depuis un téléphone** : sans réseau mémorisé (ou sur commande `AT+CWSAP…`/maintien de BOOTSEL à définir), le Pico W ouvre un point d'accès et une page web (liste des réseaux, saisie du mot de passe), afin de mettre le modem en service sans PC ni `netsetup`. **Critères d'acceptation** : (1) la page enregistre le réseau comme `AT+CWJAP_DEF` (même configuration persistante) ; (2) le point d'accès se ferme dès l'association réussie ; (3) le dialogue AT reste disponible pendant ce mode ; (4) point d'accès protégé par mot de passe (affiché par `ATI`) ; (5) essai sur carte depuis un téléphone. Complète US-W2. | À faire — sprint proposé n° 1 |
+| US-W7 | P2 | En tant qu'utilisateur, je veux **mettre à jour le modem par Wi-Fi** (`AT+CIUPDATE`, aujourd'hui `ERROR`) depuis les releases publiées, afin de ne plus reflasher avec BOOTSEL. **Critères d'acceptation** : (1) image signée, signature vérifiée avant activation ; (2) deux emplacements (image ≈ 690 Ko : à confirmer avec la carte flash) et retour à l'ancienne image si la nouvelle ne démarre pas ; (3) configuration persistante conservée ; (4) aucune mise à jour sans commande explicite. **Point ouvert** : chargeur de démarrage à concevoir (étude préalable). | À faire — étude d'abord |
+| US-T15 | P2 | En tant qu'utilisateur HTTPS, je veux **mettre à jour le magasin de racines sans reflasher** (secteurs réservés + commande AT ; point ouvert d'US-T13), afin que le TLS reste valide quand des racines expirent ou changent. **Critères d'acceptation** : magasin signé ou vérifié par empreinte, retour au magasin intégré si le magasin téléchargé est invalide, `ATI` indique la date du magasin. | À faire |
+| US-T16 | P2 | En tant que programme Neo6502 (pas seulement reload), je veux une **API de fichiers réseau** dans le modem : le Pico W parle TNFS lui-même (client UDP d'US-T14) et expose ouvrir / lire / écrire / lister / fermer, afin d'offrir le périphérique `N:` (mémo Prophet) sans protocole réseau côté 6502. **Dépend d'US-T12** (hôtes autorisés) avant toute écriture. | À faire |
+| US-W8 | P3 | En tant qu'utilisateur de NeoNavigator, je veux que la session NeoRFB soit **chiffrée** : le modem termine déjà le TLS (`AT+TLSPORT=6510`, `ATDT` chiffré) ; il faut que `neonavd` accepte le TLS (travail du projet NeoNavigator), afin que les frappes clavier ne circulent plus en clair. **Côté modem** : aucun code ; essai de bout en bout et documentation. | À faire — dépend de NeoNavigator |
+| US-W9 | P2 | En tant que PO, je veux un **premier essai de NeoNavigator sur carte** avec le modem (US09 de NeoNavigator : `ATZ`, `ATDT neonav.3617.fr:6510`, flux transparent), en UART puis en USB, débit mesuré, afin de valider le scénario publié dans Prophet (`requires: [picowifi]`) mais jamais essayé sur carte. | À faire |
+
+**Écartés (décision 2026-10-01)** : décoder NeoRFB sur le Pico W (les données décompressées, jusqu'à 76,8 Ko par
+écran, grossiraient sur la liaison série, qui est le goulot) ; navigateur HTML complet sur le Pico W (RAM
+insuffisante pour les pages modernes, pas de JavaScript ; rendu déporté retenu par l'ADR-001 de NeoNavigator).
+Les gains de NeoNavigator sont de son côté : modem en USB plutôt qu'en UART, décodeur en assembleur (US17),
+copie de rectangle (US16).
+
+**Cœur 1** : utile surtout pour US-T3 (plusieurs handshakes TLS sans geler la liaison série) ; à précéder d'une
+étude (pile réseau sur le cœur 1 : réactivité série pendant un handshake, tas avec 2 à 4 connexions TLS, écriture
+flash avec l'autre cœur en pause, `malloc` partagé).
+
+### Sprint proposé (ordre de priorité, 2026-10-01)
+1. **US-W6** — configuration Wi-Fi depuis un téléphone (premier obstacle de tout nouvel utilisateur).
+2. **US-T12** — hôtes autorisés (court ; prérequis de sécurité d'US-T16 et de `N:`).
+3. **US-T11** — flux HTTP(S) (sert Prophet et `pget` tout de suite ; repris ici sans attendre US-T3 : une connexion suffit).
+4. En parallèle, dès que la carte est disponible : validation US-T14 (TNFS sur Pico W) et US-W9 (NeoNavigator).
+
 ## Ajouts 2026-09-24 (certificats)
 | ID | P | User story | État |
 |----|---|------------|------|
