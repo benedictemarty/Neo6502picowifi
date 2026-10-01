@@ -50,7 +50,7 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `AT+CWQAP` | `OK`, `WIFI DISCONNECT` |
 | `AT+CWLAPOPT=…`, `AT+CWLAP[=…]` | `+CWLAP:(ecn,"ssid",rssi)` par SSID (dédoublonné, meilleur RSSI, trié), `OK` |
 | `AT+CWDHCP[_CUR|_DEF]?` / `=mode,en` | `+CWDHCP_DEF:3` (bit 1 = station) |
-| `AT+CIPSTATUS` | `STATUS:2|3|4|5` (+ ligne `+CIPSTATUS:` si TCP ouvert) |
+| `AT+CIPSTATUS` | `STATUS:2|3|4|5` (+ ligne `+CIPSTATUS:0,"TCP"|"UDP",…` si un lien est ouvert) |
 | `AT+CIFSR` | `+CIFSR:STAIP,"ip"`, `+CIFSR:STAMAC,"mac"` |
 | `AT+CIPSTA[_CUR|_DEF]?` / `="ip","gw","mask"` | `+CIPSTA_CUR:ip:"…"`, `:gateway:`, `:netmask:` |
 | `AT+CIPDNS[_CUR|_DEF]?` / `=1,"ip"` / `=0` | `+CIPDNS_CUR:ip` |
@@ -58,10 +58,11 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `AT+CIPSSLCCONF?` / `=0` / `=2` | `+CIPSSLCCONF:2` (CA toujours vérifiée ; `=1`/`=3` cert client → `ERROR`) |
 | `AT+CIPSTART="TCP","hôte",port` | `CONNECT`, `OK` ; `DNS Fail` ; `ALREADY CONNECTED` ; TLS si le port est dans `AT+TLSPORT` |
 | `AT+CIPSTART="SSL","hôte",port` | idem en TLS ; `no time (SNTP) for TLS`, `TLS handshake failed` (certificat refusé…) → `ERROR` |
+| `AT+CIPSTART="UDP","hôte",port` | lien UDP (port local éphémère, seuls les datagrammes de hôte:port sont reçus) : `CONNECT`, `OK` ; `DNS Fail` ; `ALREADY CONNECTED` |
 | `AT+TLSPORT?` / `=443[,p2,p3,p4]` / `=0` | ports pour lesquels `"TCP"` est fait en TLS (persistant) ; `=0` efface |
 | `AT+TLSTEST` | autotests mbedTLS (AES, GCM, SHA-256/512, CTR-DRBG, ECP, MPI) sur carte |
-| `AT+CIPSEND=n` (n ≤ 2048) | `OK`, `> `, puis après n octets `Recv n bytes`, `SEND OK` |
-| données entrantes | `+IPD,n:` suivi de n octets (segments ≤ 1460) ; `CLOSED` à la fermeture |
+| `AT+CIPSEND=n` (n ≤ 2048, ≤ 1472 en UDP) | `OK`, `> `, puis après n octets `Recv n bytes`, `SEND OK` ; en UDP, un datagramme par `CIPSEND` |
+| données entrantes | `+IPD,n:` suivi de n octets (segments ≤ 1460) ; `CLOSED` à la fermeture ; en UDP, **un `+IPD` par datagramme** (jamais regroupés ni coupés ; perdu si le tampon de 8 Ko est plein), retenus pendant un `CIPSEND` |
 | `AT+CIPCLOSE` | `CLOSED`, `OK` |
 | `AT+CIPSERVER=1,port` / `=0` | écoute entrante → `RING` (répété toutes les 3 s), `ATA` pour décrocher |
 | `AT+CIPSNTPCFG?` / `=en,tz,"serveur"`, `AT+CIPSNTPTIME?` | SNTP lwIP ; `+CIPSNTPTIME:Tue Sep 15 12:00:00 2026` |
@@ -70,7 +71,7 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `ATI` | identité (`modem X.Y.Z`), ligne `build:` (`git describe` : `vX.Y.Z` pour une release, `vX.Y.Z-N-gSHA[-dirty]` sinon), SSID mémorisé, cause du dernier reset (`power-on`, `AT+RST`, `AT+BOOTSEL (UF2 flash)`, `reboot (bootloader or debugger)`, `watchdog timeout, stage N`, `lwip assert: …`), ligne `TLS:` (pile, nombre de racines, racine retenue au dernier handshake (`last root:`), tas newlib (`heap:` utilisé, pic, max), heure, durée et suite du dernier handshake, `resumed`, drapeaux de vérification, derniers messages lwIP/mbedTLS), `TLS ports:` |
 | `AT+BOOTSEL` | `OK` puis passage en mode UF2 (`RPI-RP2`) sans toucher au bouton — spécifique à ce firmware |
 
-Non pris en charge (répond `ERROR`) : UDP, `CIPMUX=1`, mode point d'accès,
+Non pris en charge (répond `ERROR`) : `CIPMUX=1`, forme UDP à 5 paramètres (port local, mode), `ATO`/`ATA` sur un lien UDP (`NO CARRIER`), mode point d'accès,
 TLS 1.3, certificat client, mode transparent ESP (`CIPMODE=1` ; utiliser
 `ATDT` à la place — `ATDT` fait aussi du TLS vers un port de `AT+TLSPORT`).
 

@@ -22,7 +22,8 @@
 #define AT_PASS_MAX      64
 #define AT_HOST_MAX      64
 #define AT_SEND_MAX      2048  /* AT+CIPSEND=n : n maximal (ESP8266 : 2048) */
-#define AT_RX_RING_SIZE  8192  /* données TCP entrantes en attente          */
+#define AT_RX_RING_SIZE  8192  /* données TCP/UDP entrantes en attente      */
+#define AT_UDP_MAX       1472  /* datagramme UDP maximal (CIPSEND et +IPD)  */
 
 /* Codes de retour des opérations réseau. */
 enum at_net_result {
@@ -93,7 +94,10 @@ struct at_modem_ops {
     int  (*wifi_scan)(void *ctx, at_scan_cb cb, void *cb_ctx);
     void (*ip_info)(void *ctx, struct at_ip_info *info);
 
-    /* TCP sortant (une connexion, comme AT+CIPMUX=0) ; tls = TLS terminé ici */
+    /* Lien sortant unique (AT+CIPMUX=0). tcp_connect ouvre un lien TCP
+       (tls = TLS terminé ici), udp_connect un lien UDP ; tcp_send /
+       tcp_close / tcp_connected s'appliquent au lien ouvert, quel qu'il soit
+       (en UDP, tcp_send émet un datagramme). */
     int  (*tcp_connect)(void *ctx, const char *host, uint16_t port, bool tls);
     int  (*tcp_send)(void *ctx, const uint8_t *data, size_t len);
     void (*tcp_close)(void *ctx);
@@ -114,6 +118,7 @@ struct at_modem_ops {
     const char *(*tls_selftest)(void *ctx); /* AT+TLSTEST : autotests des primitives (NULL = absent) */
     const char *(*build)(void *ctx);      /* ATI : identifiant de build, git describe (NULL = rien) */
     const char *(*build_date)(void *ctx); /* AT+GMR « compile time » : date du commit (NULL = unknown) */
+    int  (*udp_connect)(void *ctx, const char *host, uint16_t port); /* NULL = UDP non supporté */
 };
 
 /* Vrai si le port est dans la liste AT+TLSPORT. */
@@ -154,6 +159,7 @@ struct at_modem {
     volatile size_t rx_head, rx_tail;
     volatile bool remote_closed;
     bool     was_connected;
+    bool     link_udp;         /* lien ouvert en UDP : tampon en datagrammes */
 };
 
 /* Initialisation ; cfg peut être NULL (valeurs par défaut). */
@@ -170,6 +176,9 @@ void at_modem_poll(struct at_modem *m);
 /* Événements venant du réseau (peuvent être appelés depuis une IRQ). */
 size_t at_modem_rx_space(const struct at_modem *m);
 size_t at_modem_rx_push(struct at_modem *m, const uint8_t *data, size_t len);
+/* Datagramme UDP entier (1..AT_UDP_MAX octets) : rendu en un seul +IPD ;
+   tout ou rien, renvoie 0 si le tampon est plein (datagramme perdu). */
+size_t at_modem_rx_push_dgram(struct at_modem *m, const uint8_t *data, size_t len);
 void   at_modem_remote_closed(struct at_modem *m);
 void   at_modem_ring(struct at_modem *m);
 

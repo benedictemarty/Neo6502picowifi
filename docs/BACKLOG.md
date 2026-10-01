@@ -24,6 +24,11 @@ fonctionner sans modification.
 | US-W2 | P1 | En tant qu'utilisateur, je veux **associer le Wi-Fi sans PC** : depuis NeoBASIC (`atconnect`, projet Neo6502Basic) ou `netsetup.neo` (gitlab.com/bocianu/neo-networking), la config restant persistante (`AT+CWJAP_DEF`). | TODO |
 | US-W3 | P2 | En tant que PO, je veux des **versions** du modem (`AT+GMR` : `Bin version(Pico W):x.y.z`, tag `vX.Y.Z`, UF2 en release) et un CHANGELOG, afin de savoir ce qui tourne sur la carte. | **Terminé 2026-09-24** — `VERSION` source unique, `build:` dans `ATI` (git describe), `tools/release.sh`, tag `v0.3.0` + UF2 en release GitHub ; tests `test_version.py` et `test_at_modem` |
 
+## Ajouts 2026-10-01 (convergence avec reload-emulator)
+| ID | P | User story | État |
+|----|---|------------|------|
+| US-T14 | P1 | En tant qu'utilisateur d'un émulateur reload-emulator sur Neo6502, je veux que le modem gère **l'UDP au format ESP8266** (`AT+CIPSTART="UDP","hôte",port`, `AT+CIPSEND=n` = un datagramme, `+IPD,n:` = un datagramme reçu, `CIPMUX=0`), afin de monter un répertoire distant par **TNFS** (serveur `tnfsd`) sans firmware Pico W dédié ; compatible aussi avec un vrai MOD-WIFI-ESP8266 sur l'UEXT. **Critères d'acceptation** : (1) un `+IPD` par datagramme, jamais regroupés ni coupés ; (2) une réponse arrivée pendant `Recv`/`SEND OK` ou un `CIPSEND` en cours n'est pas perdue ; (3) datagrammes de 532 octets (TNFS) dans les deux sens, 1472 au plus ; (4) TCP, TLS et Hayes inchangés ; (5) sur carte : échange TNFS avec `tnfsd` depuis le PC puis depuis le Neo6502. | En cours — code et tests PC faits (2026-10-01) ; validation sur carte et contre `tnfsd` à faire |
+
 ## Ajouts 2026-09-24 (certificats)
 | ID | P | User story | État |
 |----|---|------------|------|

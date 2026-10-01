@@ -24,6 +24,8 @@ static struct {
     size_t sent_len;
     int saved;
     int resets;
+    int sends;                   /* appels à tcp_send (un datagramme en UDP) */
+    bool last_udp;
     struct at_config saved_cfg;
 } M;
 
@@ -45,7 +47,10 @@ static int mconn(void *c, const char *h, uint16_t p, bool tls) {
     if (tls && M.no_time) return AT_NET_NO_TIME;
     M.tcp_up = (M.connect_result == AT_NET_OK); return M.connect_result; }
 static const char *mtls(void *c) { (void)c; return M.no_tls ? NULL : "TLS: test 1.2, root: Test Root, time: synced"; }
-static int msend(void *c, const uint8_t *d, size_t n) { (void)c; memcpy(M.sent + M.sent_len, d, n); M.sent_len += n; return AT_NET_OK; }
+static int msend(void *c, const uint8_t *d, size_t n) { (void)c; memcpy(M.sent + M.sent_len, d, n); M.sent_len += n; M.sends++; return AT_NET_OK; }
+static int mudp(void *c, const char *h, uint16_t p) {
+    (void)c; strcpy(M.last_host, h); M.last_port = p; M.last_udp = true;
+    M.tcp_up = (M.connect_result == AT_NET_OK); return M.connect_result; }
 static void mclose(void *c) { (void)c; M.tcp_up = false; }
 static bool mtcp(void *c) { (void)c; return M.tcp_up; }
 static int mlisten(void *c, uint16_t p) { (void)c; M.listen_port = p; return AT_NET_OK; }
@@ -60,7 +65,7 @@ static const char *mver(void *c) { (void)c; return "0.1.0"; }
 
 static const struct at_modem_ops ops = {
     NULL, mw, mms, mjoin, mleave, mwifi, mscan, minfo, mconn, msend, mclose, mtcp,
-    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL, mtls, NULL, NULL, NULL,
+    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL, mtls, NULL, NULL, NULL, mudp,
 };
 
 static struct at_modem modem;
@@ -278,7 +283,11 @@ static void test_prophet_http(void)
     clear_out();
     send("AT+CIPSEND=0\r\n"); CHECK_OUT("ERROR"); clear_out();
     send("AT+CIPSEND=9999\r\n"); CHECK_OUT("ERROR"); clear_out();
-    send("AT+CIPSTART=\"UDP\",\"x\",1\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+CIPSTART=\"UDP\",\"x\",1\r\n"); CHECK_OUT("CONNECT"); CHECK(M.last_udp); clear_out();
+    send("AT+CIPCLOSE\r\n"); CHECK_OUT("CLOSED"); clear_out();
+    M.wifi_up = false;
+    send("AT+CIPSTART=\"UDP\",\"x\",1\r\n"); CHECK_OUT("no ip"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+CIPSTART=\"FOO\",\"x\",1\r\n"); CHECK_OUT("ERROR"); clear_out();
     send("AT+CIPMUX=0\r\n"); CHECK_OUT("OK"); clear_out();
     send("AT+CIPMUX=1\r\n"); CHECK_OUT("ERROR"); clear_out();
 }
@@ -521,6 +530,102 @@ static void test_version(void)
     CHECK_NOT_OUT("dirty");
 }
 
+/* Datagrammes UDP : séquence du transport TNFS de reload-emulator. */
+static void test_udp(void)
+{
+    reset_mock();
+    M.wifi_up = true;
+    send("AT\r\nATE0\r\n"); clear_out();
+    send("AT+CIPCLOSE\r\n"); CHECK_OUT("ERROR"); clear_out();   /* pas de lien */
+
+    /* plateforme sans UDP : ERROR */
+    struct at_modem_ops no_udp = ops;
+    no_udp.udp_connect = NULL;
+    at_modem_init(&modem, &no_udp, NULL);
+    send("AT+CIPSTART=\"UDP\",\"tnfs.example\",16384\r\n");
+    CHECK_OUT("ERROR"); CHECK(!M.last_udp); clear_out();
+    at_modem_init(&modem, &ops, NULL);
+    send("ATE0\r\n"); clear_out();
+
+    /* restes d'un lien TCP fermé : jetés à l'ouverture du lien UDP */
+    at_modem_rx_push(&modem, (const uint8_t *)"vieux", 5);
+    M.connect_result = AT_NET_DNS_FAIL;
+    send("AT+CIPSTART=\"UDP\",\"inconnu.invalid\",16384\r\n");
+    CHECK_OUT("DNS Fail"); CHECK_OUT("ERROR"); clear_out();
+    M.connect_result = AT_NET_OK;
+    send("AT+CIPSTART=\"UDP\",\"tnfs.example\",16384\r\n");
+    CHECK(strcmp(M.out, "CONNECT\r\n\r\nOK\r\n") == 0);
+    CHECK(M.last_udp && !strcmp(M.last_host, "tnfs.example") && M.last_port == 16384);
+    CHECK_NOT_OUT("vieux");
+    clear_out();
+    send("AT+CIPSTATUS\r\n"); CHECK_OUT("STATUS:3"); CHECK_OUT("\"UDP\""); clear_out();
+    send("AT+CIPSTART=\"UDP\",\"tnfs.example\",16384\r\n"); CHECK_OUT("ALREADY CONNECTED"); clear_out();
+
+    /* envoi : un datagramme par CIPSEND, 1472 octets au plus */
+    send("AT+CIPSEND=1473\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+CIPSEND=4\r\n");
+    CHECK(strcmp(M.out, "\r\nOK\r\n> ") == 0); clear_out();
+    /* réponse arrivée pendant la saisie : retenue jusqu'à SEND OK */
+    CHECK(at_modem_rx_push_dgram(&modem, (const uint8_t *)"rep1", 4) == 4);
+    at_modem_input(&modem, (const uint8_t *)"\x00\x01\x02", 3); at_modem_poll(&modem);
+    CHECK(M.out_len == 0);
+    at_modem_input(&modem, (const uint8_t *)"\x03", 1); at_modem_poll(&modem);
+    CHECK(M.sends == 1 && M.sent_len == 4 && M.sent[3] == 3);
+    CHECK(strcmp(M.out, "\r\nRecv 4 bytes\r\n\r\nSEND OK\r\n\r\n+IPD,4:rep1") == 0);
+    clear_out();
+
+    /* réception : un +IPD par datagramme, jamais regroupés ni coupés */
+    uint8_t big[AT_UDP_MAX];
+    for (size_t i = 0; i < sizeof big; i++) big[i] = (uint8_t)i;
+    CHECK(at_modem_rx_push_dgram(&modem, (const uint8_t *)"ab", 2) == 2);
+    CHECK(at_modem_rx_push_dgram(&modem, (const uint8_t *)"cde", 3) == 3);
+    CHECK(at_modem_rx_push_dgram(&modem, big, 532) == 532);
+    CHECK(at_modem_rx_push_dgram(&modem, big, AT_UDP_MAX) == AT_UDP_MAX);
+    CHECK(at_modem_rx_push_dgram(&modem, big, AT_UDP_MAX + 1) == 0);   /* trop grand */
+    CHECK(at_modem_rx_push_dgram(&modem, big, 0) == 0);
+    at_modem_poll(&modem);
+    const char *exp = "\r\n+IPD,2:ab\r\n+IPD,3:cde\r\n+IPD,532:";
+    CHECK(memcmp(M.out, exp, strlen(exp)) == 0);
+    size_t off = strlen(exp);
+    CHECK(memcmp(M.out + off, big, 532) == 0);
+    off += 532;
+    CHECK(memcmp(M.out + off, "\r\n+IPD,1472:", 12) == 0);
+    off += 12;
+    CHECK(memcmp(M.out + off, big, AT_UDP_MAX) == 0);
+    CHECK(M.out_len == off + AT_UDP_MAX);
+    CHECK(at_modem_rx_space(&modem) == AT_RX_RING_SIZE - 1);
+    clear_out();
+
+    /* tampon plein : datagramme refusé en entier, les précédents restent intacts */
+    size_t pushed = 0;
+    while (at_modem_rx_push_dgram(&modem, big, AT_UDP_MAX)) pushed++;
+    CHECK(pushed == (AT_RX_RING_SIZE - 1) / (AT_UDP_MAX + 2));
+    at_modem_poll(&modem);
+    size_t ipd = 0;
+    for (size_t i = 0; i + 10 <= M.out_len; i++) ipd += !memcmp(M.out + i, "+IPD,1472:", 10);
+    CHECK(ipd == pushed);
+    clear_out();
+
+    /* pas de mode transparent ni de décroché en UDP */
+    send("ATO\r\n"); CHECK_OUT("NO CARRIER"); clear_out();
+    M.listen_pending = true;
+    send("ATA\r\n"); CHECK_OUT("NO CARRIER"); CHECK(M.listen_pending); clear_out();
+    M.listen_pending = false;
+
+    /* fermeture : datagrammes non lus jetés, retour au TCP en flux */
+    at_modem_rx_push_dgram(&modem, (const uint8_t *)"perdu", 5);
+    at_modem_input(&modem, (const uint8_t *)"AT+CIPCLOSE\r\n", 13);   /* sans poll avant */
+    at_modem_poll(&modem);
+    CHECK_NOT_OUT("perdu"); CHECK_OUT("CLOSED"); CHECK_OUT("OK"); CHECK(!M.tcp_up);
+    clear_out();
+    M.last_udp = false;
+    send("AT+CIPSTART=\"TCP\",\"example.com\",80\r\n"); CHECK_OUT("CONNECT"); CHECK(!M.last_udp); clear_out();
+    at_modem_rx_push(&modem, (const uint8_t *)"flux", 4);
+    at_modem_poll(&modem);
+    CHECK(strcmp(M.out, "\r\n+IPD,4:flux") == 0);
+    send("AT+CIPSTATUS\r\n"); CHECK_OUT("\"TCP\""); clear_out();
+}
+
 int main(void)
 {
     test_basic();
@@ -528,6 +633,7 @@ int main(void)
     test_netsetup_join_scan();
     test_prophet_http();
     test_rx_ring();
+    test_udp();
     test_hayes();
     test_tls();
     test_config_persist();

@@ -20,6 +20,7 @@
 #define LWIP_IPV4                   1
 #define LWIP_TCP                    1
 #define LWIP_UDP                    1
+#define MEMP_NUM_UDP_PCB            6   /* DHCP, DNS, SNTP + lien AT+CIPSTART="UDP" */
 #define TCP_WND                     (8 * TCP_MSS)
 #define TCP_MSS                     1460
 #define TCP_SND_BUF                 (8 * TCP_MSS)

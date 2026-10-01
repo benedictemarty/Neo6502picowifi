@@ -3,8 +3,8 @@
  *
  * Mode pico_cyw43_arch_lwip_threadsafe_background : les rappels lwIP
  * s'exécutent en interruption ; tout appel lwIP depuis la boucle principale
- * est encadré par cyw43_arch_lwip_begin/end. Une seule connexion TCP
- * (CIPMUX=0) + une écoute entrante (CIPSERVER / ATA).
+ * est encadré par cyw43_arch_lwip_begin/end. Un seul lien sortant, TCP ou
+ * UDP (CIPMUX=0) + une écoute TCP entrante (CIPSERVER / ATA).
  */
 #include "net_pico.h"
 #include "tls_date.h"
@@ -26,6 +26,7 @@
 #include "pico/bootrom.h"
 #include "lwip/dns.h"
 #include "lwip/tcp.h"
+#include "lwip/udp.h"
 #include "lwip/altcp.h"
 #include "lwip/altcp_tcp.h"
 #include "lwip/altcp_tls.h"
@@ -492,6 +493,7 @@ static struct altcp_pcb *listen_pcb;     /* écoute                            *
 static struct altcp_pcb *pending_pcb;    /* appel entrant non répondu         */
 static volatile int connect_state;       /* 0 en cours, 1 ok, <0 erreur       */
 static bool pcb_is_tls;
+static struct udp_pcb *upcb;             /* lien UDP (exclusif de pcb)        */
 
 /* Le handshake TLS (ECDSA/ECDHE) s'exécute dans le contexte lwIP (IRQ de
    basse priorité) et peut occuper le CPU plus de 8 s d'affilée sur RP2040,
@@ -637,9 +639,63 @@ static int tcp_connect_op(void *ctx, const char *host, uint16_t port, bool tls)
     return AT_NET_OK;
 }
 
+/* ------------------------------------------------------------- UDP */
+
+/* Datagramme reçu (rappel lwIP) : rendu tel quel en un +IPD, ou perdu si
+   trop grand ou si le tampon du modem est plein (sémantique UDP). */
+static void on_udp_recv(void *arg, struct udp_pcb *p, struct pbuf *buf,
+                        const ip_addr_t *addr, u16_t port)
+{
+    static uint8_t dgram[AT_UDP_MAX];
+    (void)arg; (void)p; (void)addr; (void)port;
+    if (buf->tot_len <= AT_UDP_MAX) {
+        u16_t n = pbuf_copy_partial(buf, dgram, buf->tot_len, 0);
+        at_modem_rx_push_dgram(modem, dgram, n);
+    }
+    pbuf_free(buf);
+}
+
+static int udp_connect_op(void *ctx, const char *host, uint16_t port)
+{
+    (void)ctx;
+    ip_addr_t addr;
+    if (!resolve(host, &addr)) return AT_NET_DNS_FAIL;
+    cyw43_arch_lwip_begin();
+    struct udp_pcb *p = udp_new_ip_type(IP_GET_TYPE(&addr));
+    int r = AT_NET_FAIL;
+    if (p) {
+        /* port local éphémère ; connecté : seuls les datagrammes de hôte:port */
+        if (udp_bind(p, IP_ANY_TYPE, 0) == ERR_OK && udp_connect(p, &addr, port) == ERR_OK) {
+            udp_recv(p, on_udp_recv, NULL);
+            upcb = p;
+            r = AT_NET_OK;
+        } else {
+            udp_remove(p);
+        }
+    }
+    cyw43_arch_lwip_end();
+    return r;
+}
+
+static int udp_send_dgram(const uint8_t *data, size_t len)
+{
+    if (len > AT_UDP_MAX) return AT_NET_FAIL;
+    cyw43_arch_lwip_begin();
+    int r = AT_NET_FAIL;
+    struct pbuf *q = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
+    if (q) {
+        memcpy(q->payload, data, len);
+        if (upcb && udp_send(upcb, q) == ERR_OK) r = AT_NET_OK;
+        pbuf_free(q);
+    }
+    cyw43_arch_lwip_end();
+    return r;
+}
+
 static int tcp_send_op(void *ctx, const uint8_t *data, size_t len)
 {
     (void)ctx;
+    if (upcb) return udp_send_dgram(data, len);
     uint32_t t0 = to_ms_since_boot(get_absolute_time());
     while (len) {
         if (!pcb) return AT_NET_FAIL;
@@ -665,20 +721,21 @@ static void tcp_close_op(void *ctx)
     (void)ctx;
     cyw43_arch_lwip_begin();
     if (pcb) { pcb_detach(pcb); pcb = NULL; }
+    if (upcb) { udp_remove(upcb); upcb = NULL; }
     cyw43_arch_lwip_end();
 }
 
 static bool tcp_connected_op(void *ctx)
 {
     (void)ctx;
-    return pcb != NULL && connect_state == 1;
+    return upcb != NULL || (pcb != NULL && connect_state == 1);
 }
 
 static err_t on_accept(void *arg, struct altcp_pcb *newpcb, err_t err)
 {
     (void)arg;
     if (err != ERR_OK || !newpcb) return ERR_VAL;
-    if (pcb || pending_pcb) { altcp_abort(newpcb); return ERR_ABRT; } /* occupé */
+    if (pcb || pending_pcb || upcb) { altcp_abort(newpcb); return ERR_ABRT; } /* occupé */
     pending_pcb = newpcb;
     altcp_recv(newpcb, on_recv);
     altcp_err(newpcb, on_err);
@@ -826,6 +883,7 @@ struct at_modem_ops net_pico_ops = {
     .tcp_connected = tcp_connected_op, .tcp_listen = tcp_listen_op, .tcp_accept = tcp_accept_op,
     .config_save = config_flash_save, .sntp_time = sntp_time_op, .ping = ping_op,
     .reset = reset_op, .bootsel = bootsel_op, .version = version_op, .build = build_op, .build_date = build_date_op, .tls_info = tls_info_op, .tls_selftest = tls_selftest_op,
+    .udp_connect = udp_connect_op,
 };
 
 bool net_pico_init(struct at_modem *m)

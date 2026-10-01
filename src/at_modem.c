@@ -113,6 +113,26 @@ size_t at_modem_rx_push(struct at_modem *m, const uint8_t *data, size_t len)
     return len;
 }
 
+/* En UDP, chaque datagramme est rangé derrière sa longueur (2 octets, poids
+   fort d'abord) ; rx_head n'avance qu'une fois le datagramme complet. */
+size_t at_modem_rx_push_dgram(struct at_modem *m, const uint8_t *data, size_t len)
+{
+    if (len == 0 || len > AT_UDP_MAX || len + 2 > at_modem_rx_space(m)) return 0;
+    size_t head = m->rx_head;
+    m->rx_ring[head] = (uint8_t)(len >> 8);
+    head = (head + 1) % AT_RX_RING_SIZE;
+    m->rx_ring[head] = (uint8_t)len;
+    head = (head + 1) % AT_RX_RING_SIZE;
+    for (size_t i = 0; i < len; i++) {
+        m->rx_ring[head] = data[i];
+        head = (head + 1) % AT_RX_RING_SIZE;
+    }
+    m->rx_head = head;
+    return len;
+}
+
+static void rx_flush(struct at_modem *m) { m->rx_tail = m->rx_head; }
+
 static size_t rx_pop(struct at_modem *m, uint8_t *dst, size_t max)
 {
     size_t n = 0, tail = m->rx_tail;
@@ -227,6 +247,7 @@ static void go_online(struct at_modem *m)
 static void hangup(struct at_modem *m)
 {
     if (m->ops->tcp_connected(m->ops->ctx)) m->ops->tcp_close(m->ops->ctx);
+    if (m->link_udp) { m->link_udp = false; rx_flush(m); }  /* datagrammes non lus */
     m->remote_closed = false;
     m->mode = AT_MODE_COMMAND;
 }
@@ -272,11 +293,11 @@ static bool hayes(struct at_modem *m, const char *cmd)
         ok(m);
         return true;
     case 'O':
-        if (m->ops->tcp_connected(m->ops->ctx)) go_online(m);
+        if (m->ops->tcp_connected(m->ops->ctx) && !m->link_udp) go_online(m);
         else out(m, "\r\nNO CARRIER\r\n");
         return true;
     case 'A':
-        if (m->ops->tcp_accept(m->ops->ctx)) {
+        if (!m->link_udp && m->ops->tcp_accept(m->ops->ctx)) {
             m->ring_pending = false;
             m->ring_count = 0;
             m->was_connected = true;
@@ -403,7 +424,7 @@ static void plus_command(struct at_modem *m, const char *cmd)
     } else if (!strcmp(cmd, "CIPSTATUS")) {
         int st = cipstatus(m);
         outf(m, "STATUS:%d\r\n", st);
-        if (st == 3) out(m, "+CIPSTATUS:0,\"TCP\",\"0.0.0.0\",0,0\r\n");
+        if (st == 3) outf(m, "+CIPSTATUS:0,\"%s\",\"0.0.0.0\",0,0\r\n", m->link_udp ? "UDP" : "TCP");
         ok(m);
     } else if (!strcmp(cmd, "CIFSR")) {
         m->ops->ip_info(m->ops->ctx, &info);
@@ -489,13 +510,16 @@ static void plus_command(struct at_modem *m, const char *cmd)
         if (!parse_quoted(&p, type, sizeof type) || !skip_comma(&p)
             || !parse_quoted(&p, host, sizeof host) || !skip_comma(&p)
             || !parse_int(&p, &port) || port < 1 || port > 65535) { error(m); return; }
-        bool tls;
+        bool tls = false, udp = false;
         if (!strcmp(type, "TCP")) tls = at_modem_port_is_tls(&m->cfg, (uint16_t)port);
         else if (!strcmp(type, "SSL")) tls = true;
+        else if (!strcmp(type, "UDP") && m->ops->udp_connect) udp = true;
         else { error(m); return; }
         if (m->ops->tcp_connected(m->ops->ctx)) { out(m, "ALREADY CONNECTED\r\n"); error(m); return; }
         if (!m->ops->wifi_connected(m->ops->ctx)) { out(m, "no ip\r\n"); error(m); return; }
-        int r = m->ops->tcp_connect(m->ops->ctx, host, (uint16_t)port, tls);
+        if (udp) rx_flush(m);   /* aucun lien ouvert : reste éventuel d'un lien TCP */
+        int r = udp ? m->ops->udp_connect(m->ops->ctx, host, (uint16_t)port)
+                    : m->ops->tcp_connect(m->ops->ctx, host, (uint16_t)port, tls);
         if (r == AT_NET_DNS_FAIL) { out(m, "DNS Fail\r\n"); error(m); return; }
         if (r == AT_NET_NO_TIME) { out(m, "no time (SNTP) for TLS\r\n"); error(m); return; }
         if (r == AT_NET_TLS_FAIL) { out(m, "TLS handshake failed\r\n"); error(m); return; }
@@ -503,11 +527,13 @@ static void plus_command(struct at_modem *m, const char *cmd)
         if (r != AT_NET_OK) { error(m); return; }
         m->remote_closed = false;
         m->was_connected = true;
+        m->link_udp = udp;
         out(m, "CONNECT\r\n");
         ok(m);
     } else if (starts(cmd, "CIPSEND=", &p)) {
         if (!parse_int(&p, &v) || v < 1 || v > AT_SEND_MAX) { error(m); return; }
         if (!m->ops->tcp_connected(m->ops->ctx)) { out(m, "link is not valid\r\n"); error(m); return; }
+        if (m->link_udp && v > AT_UDP_MAX) { error(m); return; }
         m->send_expected = (size_t)v;
         m->send_len = 0;
         m->mode = AT_MODE_CIPSEND;
@@ -684,7 +710,7 @@ void at_modem_input(struct at_modem *m, const uint8_t *data, size_t len)
 
 void at_modem_poll(struct at_modem *m)
 {
-    uint8_t buf[1460];
+    uint8_t buf[AT_UDP_MAX];    /* en TCP : blocs de 1460 (segment Ethernet) */
 
     /* +++ : temps de garde écoulé après le 3e '+' → mode commande (les '+'
        retenus ne sont pas transmis) ; séquence incomplète → on les transmet. */
@@ -705,8 +731,15 @@ void at_modem_poll(struct at_modem *m)
     }
 
     /* données entrantes */
-    while (rx_used(m) > 0 && m->mode != AT_MODE_CIPSEND) {
-        size_t n = rx_pop(m, buf, sizeof buf);
+    while (m->link_udp && rx_used(m) >= 2 && m->mode == AT_MODE_COMMAND) {
+        uint8_t hdr[2] = { 0, 0 };
+        rx_pop(m, hdr, 2);
+        size_t n = rx_pop(m, buf, ((size_t)hdr[0] << 8) | hdr[1]);
+        outf(m, "\r\n+IPD,%u:", (unsigned)n);
+        m->ops->write(m->ops->ctx, buf, n);
+    }
+    while (!m->link_udp && rx_used(m) > 0 && m->mode != AT_MODE_CIPSEND) {
+        size_t n = rx_pop(m, buf, 1460);
         if (m->mode == AT_MODE_ONLINE) {
             m->ops->write(m->ops->ctx, buf, n);
         } else {
