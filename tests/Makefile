@@ -11,7 +11,7 @@ MBED_CFLAGS = -std=c11 -g -O1 -fsanitize=address,undefined -I. -I$(MBEDTLS_DIR)/
 MBED_SRCS = $(wildcard $(MBEDTLS_DIR)/library/*.c)
 MBED_OBJS = $(patsubst $(MBEDTLS_DIR)/library/%.c,mbedtls-host/%.o,$(MBED_SRCS))
 
-test: test_at_modem test_dhcp_server test_web_setup test_tnfs_link test_http_parse test_tls_date test_reset_cause test_roots_store test_roots2c test_version test_roots_ca_cb_run
+test: test_at_modem test_dhcp_server test_web_setup test_tnfs_link test_http_parse test_tnfs_client_run test_tls_date test_reset_cause test_roots_store test_roots2c test_version test_roots_ca_cb_run
 	./test_at_modem
 	./test_dhcp_server
 	./test_web_setup
@@ -33,8 +33,8 @@ test_tls_date: test_tls_date.c ../src/tls_date.c ../src/tls_date.h
 test_dhcp_server: test_dhcp_server.c ../src/dhcp_server.c ../src/dhcp_server.h ../src/dns_catchall.c ../src/dns_catchall.h
 	$(CC) $(CFLAGS) -o $@ test_dhcp_server.c ../src/dhcp_server.c ../src/dns_catchall.c
 
-test_web_setup: test_web_setup.c ../src/web_setup.c ../src/web_setup.h ../src/at_modem.c ../src/at_modem.h ../src/http_parse.c
-	$(CC) $(CFLAGS) -o $@ test_web_setup.c ../src/web_setup.c ../src/at_modem.c ../src/http_parse.c
+test_web_setup: test_web_setup.c ../src/web_setup.c ../src/web_setup.h ../src/at_modem.c ../src/at_modem.h ../src/http_parse.c ../src/tnfs_client.c
+	$(CC) $(CFLAGS) -o $@ test_web_setup.c ../src/web_setup.c ../src/at_modem.c ../src/http_parse.c ../src/tnfs_client.c
 
 test_http_parse: test_http_parse.c ../src/http_parse.c ../src/http_parse.h
 	$(CC) $(CFLAGS) -o $@ test_http_parse.c ../src/http_parse.c
@@ -42,11 +42,24 @@ test_http_parse: test_http_parse.c ../src/http_parse.c ../src/http_parse.h
 test_tnfs_link: test_tnfs_link.c ../src/tnfs_link.c ../src/tnfs_link.h
 	$(CC) $(CFLAGS) -o $@ test_tnfs_link.c ../src/tnfs_link.c
 
+test_tnfs_client: test_tnfs_client.c ../src/tnfs_client.c ../src/tnfs_client.h
+	$(CC) $(CFLAGS) -std=gnu11 -o $@ test_tnfs_client.c ../src/tnfs_client.c
+
+# TNFSD = binaire tnfsd (spectranet/tnfs/tnfsd) : session réelle sur 127.0.0.1:16384
+ifneq ($(TNFSD),)
+test_tnfs_client_run: test_tnfs_client
+	@root=$$(mktemp -d); $(TNFSD) $$root >/dev/null 2>&1 & pid=$$!; sleep 0.5; \
+	TNFS_HOST=127.0.0.1 ./test_tnfs_client; rc=$$?; kill $$pid; rm -rf $$root; exit $$rc
+else
+test_tnfs_client_run: test_tnfs_client
+	./test_tnfs_client
+endif
+
 test_reset_cause: test_reset_cause.c ../src/reset_cause.c ../src/reset_cause.h
 	$(CC) $(CFLAGS) -o $@ test_reset_cause.c ../src/reset_cause.c
 
-test_at_modem: test_at_modem.c ../src/at_modem.c ../src/at_modem.h ../src/http_parse.c ../src/http_parse.h
-	$(CC) $(CFLAGS) -o $@ test_at_modem.c ../src/at_modem.c ../src/http_parse.c
+test_at_modem: test_at_modem.c ../src/at_modem.c ../src/at_modem.h ../src/http_parse.c ../src/http_parse.h ../src/tnfs_client.c ../src/tnfs_client.h
+	$(CC) $(CFLAGS) -o $@ test_at_modem.c ../src/at_modem.c ../src/http_parse.c ../src/tnfs_client.c
 
 roots_gen.c: ../certs/roots.pem ../tools/roots2c.py
 	$(PYTHON) ../tools/roots2c.py ../certs/roots.pem $@
@@ -78,6 +91,6 @@ test_roots_ca_cb_run:
 endif
 
 clean:
-	rm -rf test_at_modem test_dhcp_server test_web_setup test_tnfs_link test_http_parse test_tls_date test_reset_cause test_roots_store test_roots_ca_cb roots_gen.c roots_fixture_gen.c mbedtls-host
+	rm -rf test_at_modem test_dhcp_server test_web_setup test_tnfs_link test_http_parse test_tnfs_client test_tls_date test_reset_cause test_roots_store test_roots_ca_cb roots_gen.c roots_fixture_gen.c mbedtls-host
 
-.PHONY: test test_roots2c test_version test_roots_ca_cb_run clean
+.PHONY: test test_tnfs_client_run test_roots2c test_version test_roots_ca_cb_run clean

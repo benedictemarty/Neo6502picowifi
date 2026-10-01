@@ -18,6 +18,7 @@
 #include <stdint.h>
 
 #include "http_parse.h"
+#include "tnfs_client.h"
 
 #define AT_LINE_MAX      256   /* longueur max d'une ligne de commande       */
 #define AT_SSID_MAX      32
@@ -140,6 +141,10 @@ struct at_modem_ops {
     /* Attente active (~1 ms) pendant AT+HTTPGET / AT+HTTPREAD : le réseau
        continue de tourner, le watchdog est servi. NULL = HTTP non supporté. */
     void (*idle)(void *ctx);
+    /* US-T16 : un échange TNFS (UDP) avec hôte:port, voir tnfs_xfer_fn
+       (req NULL = écoute seulement) ; < 0 si rien reçu. NULL = absent. */
+    int  (*nfs_xfer)(void *ctx, const char *host, uint16_t port, const uint8_t *req, size_t len,
+                     uint8_t *resp, size_t cap, uint32_t timeout_ms);
 };
 
 /* Vrai si le port est dans la liste AT+TLSPORT. */
@@ -204,6 +209,12 @@ struct at_modem {
         long   remaining;      /* octets du corps restants, -1 = jusqu'à la fermeture */
         struct http_chunked ch;
     } http;
+
+    /* US-T16 : fichiers distants (AT+NMOUNT, AT+NOPEN…) */
+    struct tnfs_client nfs;
+    char     nfs_host[AT_HOST_MAX + 1];
+    uint16_t nfs_port;
+    int      nfs_wfd;          /* AT+NWRITE en cours : descripteur, sinon -1 */
 
     /* US-T12 : dernières tentatives de connexion (anneau) */
     struct at_log_entry log[AT_LOG_MAX];

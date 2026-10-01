@@ -907,6 +907,61 @@ static void bootsel_op(void *ctx)
 
 static void idle_op(void *ctx) { (void)ctx; wait_ms(1); }   /* AT+HTTPGET/HTTPREAD */
 
+/* ------------------------------------------- TNFS fichiers (US-T16) */
+
+/* Lien UDP propre aux commandes AT+N… (indépendant de CIPSTART et du port
+   USB TNFS) ; un datagramme reçu est gardé jusqu'à la lecture suivante. */
+static struct udp_pcb *nfs_pcb;
+static char nfs_cur_host[AT_HOST_MAX + 1];
+static uint16_t nfs_cur_port;
+static uint8_t nfs_rx[TNFS_MSG_MAX];
+static volatile int nfs_rx_len = -1;
+
+static void on_nfs_udp(void *arg, struct udp_pcb *p, struct pbuf *buf, const ip_addr_t *a, u16_t port)
+{
+    (void)arg; (void)p; (void)a; (void)port;
+    if (buf->tot_len <= sizeof nfs_rx) nfs_rx_len = pbuf_copy_partial(buf, nfs_rx, buf->tot_len, 0);
+    pbuf_free(buf);
+}
+
+static int nfs_xfer_op(void *ctx, const char *host, uint16_t port, const uint8_t *req, size_t len,
+                       uint8_t *resp, size_t cap, uint32_t timeout_ms)
+{
+    (void)ctx;
+    if (!nfs_pcb || strcmp(host, nfs_cur_host) || port != nfs_cur_port) {
+        ip_addr_t addr;
+        if (nfs_pcb) { cyw43_arch_lwip_begin(); udp_remove(nfs_pcb); cyw43_arch_lwip_end(); nfs_pcb = NULL; }
+        if (!resolve(host, &addr)) return -1;
+        cyw43_arch_lwip_begin();
+        nfs_pcb = udp_new_ip_type(IP_GET_TYPE(&addr));
+        if (nfs_pcb && (udp_bind(nfs_pcb, IP_ANY_TYPE, 0) != ERR_OK || udp_connect(nfs_pcb, &addr, port) != ERR_OK)) {
+            udp_remove(nfs_pcb);
+            nfs_pcb = NULL;
+        }
+        if (nfs_pcb) udp_recv(nfs_pcb, on_nfs_udp, NULL);
+        cyw43_arch_lwip_end();
+        if (!nfs_pcb) return -1;
+        snprintf(nfs_cur_host, sizeof nfs_cur_host, "%s", host);
+        nfs_cur_port = port;
+    }
+    if (req) {
+        nfs_rx_len = -1;
+        cyw43_arch_lwip_begin();
+        struct pbuf *q = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
+        if (q) { memcpy(q->payload, req, len); udp_send(nfs_pcb, q); pbuf_free(q); }
+        cyw43_arch_lwip_end();
+    }
+    uint32_t t0 = to_ms_since_boot(get_absolute_time());
+    while (nfs_rx_len < 0 && to_ms_since_boot(get_absolute_time()) - t0 < timeout_ms) wait_ms(1);
+    cyw43_arch_lwip_begin();
+    int n = nfs_rx_len;
+    if (n > (int)cap) n = (int)cap;
+    if (n >= 0) memcpy(resp, nfs_rx, (size_t)n);
+    nfs_rx_len = -1;
+    cyw43_arch_lwip_end();
+    return n;
+}
+
 static const char *version_op(void *ctx) { (void)ctx; return PICOW_MODEM_VERSION; }
 static const char *build_op(void *ctx) { (void)ctx; return PICOW_MODEM_BUILD; }
 static const char *build_date_op(void *ctx) { (void)ctx; return PICOW_MODEM_DATE; }
@@ -925,6 +980,7 @@ struct at_modem_ops net_pico_ops = {
     .udp_connect = udp_connect_op,
     .ap_setup = ap_pico_setup, .ap_setup_ssid = ap_pico_ssid,
     .idle = idle_op,
+    .nfs_xfer = nfs_xfer_op,
 };
 
 bool net_pico_init(struct at_modem *m)

@@ -79,6 +79,13 @@ Wi-Fi modem for the Neo6502 (stories US-T1 and US-T2 in `docs/BACKLOG.md`).
 | `AT+HTTPGET="url"[,start[,end]]` | GET request (TLS for `https://`, redirects followed, `Range` if start/end): `+HTTPGET:<code>,<size or -1>,"<type>"`, `OK`; see "HTTP(S) streaming" |
 | `AT+HTTPREAD=n` (1 ≤ n ≤ 2048) | `+HTTPREAD:<k>,<more>:` then k body bytes, `OK`; `more` = 0: body finished |
 | `AT+HTTPCLOSE` | closes the HTTP session, `OK` |
+| `AT+NMOUNT="host"[,port[,"/path"[,"user","pass"]]]` / `?` | mounts a TNFS server (port 16384 by default): `+NMOUNT:<version>`; see "Remote files (TNFS)" |
+| `AT+NOPEN="path"[,mode]` | mode 0 read (default), 1 write (create, truncate), 2 append, 3 read/write: `+NOPEN:<h>` |
+| `AT+NREAD=h,n` (n ≤ 512) | `+NREAD:<k>:` then k bytes, `OK`; k = 0: end of file |
+| `AT+NWRITE=h,n` (n ≤ 512) | `OK`, `> `, then after n bytes `+NWRITE:<k>`, `OK` |
+| `AT+NCLOSE=h`, `AT+NSEEK=h,pos[,0|1|2]` | close; seek (start, current, end): `+NSEEK:<pos>` |
+| `AT+NSTAT="path"`, `AT+NDIR="dir"` | `+NSTAT:<size>,<dir 0|1>,<mtime>`; one `+NDIR:"name",<size>,<0|1>` line per entry |
+| `AT+NDEL`, `AT+NMKDIR`, `AT+NRMDIR="path"`, `AT+NREN="from","to"`, `AT+NUMOUNT` | delete, directories, rename, unmount |
 | `AT+NHOSTS?` | `+NHOSTS:<on>,"host1",…`: host filter; **read-only** (`AT+NHOSTS=…` → `ERROR`, change it from the `/hosts` page) |
 | `AT+NLOG?` | last 16 attempts: `+NLOG:<age s>,"TCP|SSL|UDP|DIAL|PING|TNFS|SNTP","host",port,allowed|refused` |
 | `AT+APSETUPPWD="…"` / `?` | access point password (8 to 63 printable ASCII characters, persistent); default `neo6502wifi` |
@@ -118,6 +125,30 @@ OK
 - Request: `GET <path> HTTP/1.1`, `Host`, `User-Agent: Neo6502picowifi/<version>`,
   `Accept-Encoding: identity`, `Connection: close`.
 
+## Remote files (TNFS)
+
+Any Neo6502 program can read and write files on a **TNFS** server (FujiNet/Spectranet
+`tnfsd`) with plain AT commands: the modem runs the protocol (sessions, sequence numbers,
+retries, `EAGAIN`); this is the basis of the `N:` device (Neo6502Prophet memo).
+
+```
+AT+NMOUNT="server.local"             → +NMOUNT:1.2
+AT+NOPEN="/games/tetris.neo"         → +NOPEN:3
+AT+NREAD=3,512                       → +NREAD:512:<512 bytes>  …  +NREAD:0:  (end)
+AT+NCLOSE=3
+AT+NOPEN="/save.dat",1  AT+NWRITE=4,100  > <100 bytes>  → +NWRITE:100
+AT+NDIR="/games"                     → +NDIR:"tetris.neo",20480,0 …
+```
+
+- Errors: `+NERR:<code>,"<name>"` then `ERROR`; TNFS server codes (2 `ENOENT`, 6 `EBADF`,
+  9 `EACCES`, 0x21 `EOF`…); 256 `TIMEOUT` (no reply after 4 tries of 1.5 s), 257
+  `BADREPLY`, 258 `NOTMOUNTED`, 259 `BADARG`.
+- Own UDP link, independent from `CIPSTART`/`ATDT` and the TNFS USB port; the host filter
+  (US-T12) applies to `AT+NMOUNT`.
+- In `+NDIR`, a `"` in a name is shown as `'`; sorted list, directories first, hidden files
+  omitted (default `OPENDIRX` options).
+- Protocol: TNFS specification (spectranet/tnfs/tnfs-protocol.md) and `tnfsd` constants.
+
 ## Allowed hosts (connection filter)
 
 So that a malicious `.neo` program cannot send the storage contents to a server of its
@@ -129,7 +160,7 @@ its subdomains, or IP address).
   its own list. Over AT: read-only (`AT+NHOSTS?`) and log (`AT+NLOG?`).
 - **Disabled by default** (netsetup, prophet, NeoNavigator unchanged).
 - When active: `CIPSTART` (TCP, SSL, UDP), `ATDT`, `AT$TNFS` and the TNFS port,
-  `AT+PING`, `AT+HTTPGET` (and each redirect), a new `AT+CIPSNTPCFG` server are refused (`host not allowed` / `NO CARRIER`)
+  `AT+PING`, `AT+HTTPGET` (and each redirect), `AT+NMOUNT`, a new `AT+CIPSNTPCFG` server are refused (`host not allowed` / `NO CARRIER`)
   for a host not in the list — the name is checked **before** any DNS query (a name alone
   can carry data); **incoming calls** are refused (`CIPSERVER=1`, `ATA`, auto answer);
   settings that would allow hijacking an allowed host are **locked over AT**: Wi-Fi
@@ -262,6 +293,7 @@ the value in `netsetup.pas`).
 make -C tests      # modem core (test_at_modem) + TLS dates (test_tls_date) on the PC, gcc + ASan/UBSan
                    # + setup access point: DHCP and captive DNS (test_dhcp_server), page (test_web_setup)
                    # + TNFS USB port frames (test_tnfs_link), HTTP parsing (test_http_parse)
+                   # + TNFS client (test_tnfs_client; TNFSD=<tnfsd binary>: real session)
                    # + root store: generator (test_roots2c.py), lookup (test_roots_store),
                    #   callback against mbedTLS (test_roots_ca_cb, needs PICO_SDK_PATH or MBEDTLS_DIR);
                    #   without mbedTLS that last test is SKIPPED with an explicit message
@@ -300,7 +332,8 @@ python3 validation/validate.py /tmp/neomodem --pc [--tnfs-pty /tmp/neotnfs]
 - Differences: simulated Wi-Fi (the PC network; `AT+CWJAP` accepts any SSID), no access
   point, no TLS session resumption, certificate dates checked with the PC clock (no SNTP
   required), `AT+PING` through the `ping` command.
-- Report: `validation/RAPPORT-validation-pc-2026-10-01.md` (78/78).
+- Report: `validation/RAPPORT-validation-pc-2026-10-01.md` (92/92 with `--nfs` and `--tnfsd`
+  against a local `tnfsd`).
 
 ## Layout
 
@@ -314,6 +347,7 @@ src/web_setup.[ch]    setup page: HTTP, form, captive portal (portable, tested o
 src/tnfs_link.[ch]    TNFS USB port frames and reply queue (portable, tested on the PC)
 src/tnfs_pico.[ch]    TNFS USB port: independent UDP link, non-blocking DNS
 src/http_parse.[ch]   HTTP streaming: URL, redirects, headers, chunked (portable, tested on the PC)
+src/tnfs_client.[ch]  TNFS client of the AT+N… commands (portable, tested on the PC and against tnfsd)
 src/tls_date.[ch]     civil date without gmtime_r (certificate date checks)
 src/mbedtls_config.h  mbedTLS configuration (TLS 1.2 client)
 certs/roots.pem       trust roots (Mozilla store); tools/roots2c.py compiles them

@@ -72,6 +72,50 @@ static void midle(void *c)
         at_modem_remote_closed(&modem);
     }
 }
+/* faux serveur TNFS en mémoire : un fichier (contenu nfs_file), un dossier /d */
+static struct { uint8_t file[2048]; size_t len, pos; bool exists, open, silent; char last_host[64]; uint16_t last_port; int calls; } NF;
+static int mnfs(void *c, const char *host, uint16_t port, const uint8_t *q, size_t len, uint8_t *r, size_t cap, uint32_t t)
+{
+    (void)c; (void)cap; (void)t; (void)len;
+    NF.calls++;
+    strcpy(NF.last_host, host); NF.last_port = port;
+    if (!q || NF.silent) return -1;
+    memcpy(r, q, 4);
+    if (q[3] == 0x00) { r[0] = 0x34; r[1] = 0x12; }          /* session 0x1234 */
+    r[4] = 0;
+    size_t n = 5;
+    const char *path = (const char *)q + 4;
+    switch (q[3]) {
+    case 0x00: r[5] = 2; r[6] = 1; r[7] = 0; r[8] = 0; n = 9; break;          /* version 1.2 */
+    case 0x29: path = (const char *)q + 8;
+        if (strcmp(path, "/a.txt")) { r[4] = 0x02; break; }
+        if (q[5] & 0x02) { if (q[6] & 0x02) NF.len = 0; NF.exists = true; }      /* écriture, TRUNC */
+        if (!NF.exists) { r[4] = 0x02; break; }
+        NF.open = true; NF.pos = (q[4] & 0x08) ? NF.len : 0; r[5] = 7; n = 6; break;
+    case 0x21: { size_t want = (size_t)(q[5] | q[6] << 8), k = NF.len - NF.pos < want ? NF.len - NF.pos : want;
+        if (q[4] != 7) { r[4] = 0x06; break; }
+        if (!k) { r[4] = 0x21; break; }
+        r[5] = (uint8_t)k; r[6] = (uint8_t)(k >> 8); memcpy(r + 7, NF.file + NF.pos, k); NF.pos += k; n = 7 + k; break; }
+    case 0x22: { size_t k = (size_t)(q[5] | q[6] << 8);
+        memcpy(NF.file + NF.pos, q + 7, k); NF.pos += k; if (NF.pos > NF.len) NF.len = NF.pos;
+        r[5] = (uint8_t)k; r[6] = (uint8_t)(k >> 8); n = 7; break; }
+    case 0x23: if (q[4] != 7 || !NF.open) r[4] = 0x06; NF.open = false; break;
+    case 0x25: NF.pos = (size_t)(q[6] | q[7] << 8) + (q[5] == 2 ? NF.len : 0);
+        r[5] = (uint8_t)NF.pos; r[6] = (uint8_t)(NF.pos >> 8); r[7] = r[8] = 0; n = 9; break;
+    case 0x24: if (!strcmp(path, "/d")) { memset(r + 5, 0, 24); r[6] = 0x41; n = 29; break; }   /* 040755 */
+        if (strcmp(path, "/a.txt") || !NF.exists) { r[4] = 0x02; break; }
+        memset(r + 5, 0, 24); r[6] = 0x81; r[11] = (uint8_t)NF.len; r[12] = (uint8_t)(NF.len >> 8); r[19] = 100; n = 29; break;
+    case 0x17: r[5] = 3; r[6] = 2; r[7] = 0; n = 8; break;
+    case 0x18: { r[5] = 2; r[6] = 1; r[7] = r[8] = 0; n = 9;
+        uint8_t e1[] = { 1, 0,0,0,0, 0,0,0,0, 0,0,0,0, 'd', 0 };
+        uint8_t e2[] = { 0, 5,0,0,0, 0,0,0,0, 0,0,0,0, 'q','"','.','t', 0 };
+        memcpy(r + n, e1, sizeof e1); n += sizeof e1; memcpy(r + n, e2, sizeof e2); n += sizeof e2; break; }
+    case 0x12: case 0x13: case 0x14: case 0x28: case 0x01: break;
+    case 0x26: if (strcmp(path, "/a.txt") || !NF.exists) r[4] = 0x02; else NF.exists = false; break;
+    default: r[4] = 0x16;
+    }
+    return (int)n;
+}
 static int map(void *c, int on) { (void)c; M.ap_on = on; return AT_NET_OK; }
 static const char *mapssid(void *c) { (void)c; return M.ap_on ? "Neo6502-modem-1122" : NULL; }
 static int mudp(void *c, const char *h, uint16_t p) {
@@ -91,7 +135,7 @@ static const char *mver(void *c) { (void)c; return "0.1.0"; }
 
 static const struct at_modem_ops ops = {
     NULL, mw, mms, mjoin, mleave, mwifi, mscan, minfo, mconn, msend, mclose, mtcp,
-    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL, mtls, NULL, NULL, NULL, mudp, map, mapssid, midle,
+    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL, mtls, NULL, NULL, NULL, mudp, map, mapssid, midle, mnfs,
 };
 
 static int failures, checks;
@@ -1023,6 +1067,79 @@ static void test_http(void)
     send("AT+HTTPGET=\"http://x.fr/\"\r\n"); CHECK_OUT("ERROR"); clear_out();
 }
 
+/* US-T16 : fichiers TNFS en commandes AT */
+static void test_nfs(void)
+{
+    reset_mock();
+    M.wifi_up = true;
+    memset(&NF, 0, sizeof NF);
+    send("ATE0\r\n"); clear_out();
+    send("AT+NOPEN=\"/a.txt\"\r\n"); CHECK_OUT("+NERR:258,\"NOTMOUNTED\""); CHECK_OUT("ERROR"); clear_out();
+    send("AT+NMOUNT?\r\n"); CHECK_OUT("+NMOUNT:\"\",0"); clear_out();
+    send("AT+NMOUNT=\"files.example\"\r\n"); CHECK_OUT("+NMOUNT:1.2\r\n"); CHECK_OUT("OK");
+    CHECK(!strcmp(NF.last_host, "files.example") && NF.last_port == 16384); clear_out();
+    send("AT+NMOUNT?\r\n"); CHECK_OUT("+NMOUNT:\"files.example\",16384"); clear_out();
+    send("AT+NMOUNT=\"files.example\",16385,\"/home\",\"u\",\"p\"\r\n"); CHECK_OUT("+NMOUNT:1.2"); CHECK(NF.last_port == 16385); clear_out();
+
+    /* écriture par > puis octets, comme CIPSEND */
+    send("AT+NOPEN=\"/a.txt\",1\r\n"); CHECK_OUT("+NOPEN:7\r\n"); clear_out();
+    send("AT+NWRITE=7,5\r\n"); CHECK(strcmp(M.out, "\r\nOK\r\n> ") == 0); clear_out();
+    at_modem_input(&modem, (const uint8_t *)"he\0lo", 5); at_modem_poll(&modem);
+    CHECK_OUT("+NWRITE:5\r\n\r\nOK"); CHECK(NF.len == 5 && !memcmp(NF.file, "he\0lo", 5)); clear_out();
+    send("AT+NCLOSE=7\r\n"); CHECK_OUT("OK"); clear_out();
+    send("AT+NCLOSE=7\r\n"); CHECK_OUT("+NERR:6,\"EBADF\""); clear_out();
+    /* lecture, fin de fichier, déplacement */
+    send("AT+NOPEN=\"/a.txt\"\r\n"); CHECK_OUT("+NOPEN:7"); clear_out();
+    send("AT+NREAD=7,3\r\n"); CHECK(M.out_len == 18 && !memcmp(M.out, "+NREAD:3:he\0\r\nOK\r\n", 18)); clear_out();
+    send("AT+NREAD=7,512\r\n"); CHECK_OUT("+NREAD:2:lo\r\nOK"); clear_out();
+    send("AT+NREAD=7,10\r\n"); CHECK_OUT("+NREAD:0:\r\nOK"); clear_out();        /* fin */
+    send("AT+NSEEK=7,1\r\n"); CHECK_OUT("+NSEEK:1\r\n"); clear_out();
+    send("AT+NSEEK=7,0,2\r\n"); CHECK_OUT("+NSEEK:5\r\n"); clear_out();
+    send("AT+NSEEK=7,0,3\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+NCLOSE=7\r\n"); clear_out();
+    /* ajout */
+    send("AT+NOPEN=\"/a.txt\",2\r\n"); clear_out();
+    send("AT+NWRITE=7,2\r\n"); at_modem_input(&modem, (const uint8_t *)"!!", 2); at_modem_poll(&modem);
+    CHECK(NF.len == 7 && !memcmp(NF.file + 5, "!!", 2)); clear_out();
+    send("AT+NCLOSE=7\r\n"); clear_out();
+    /* stat, liste (guillemet dans un nom remplacé), suppression */
+    send("AT+NSTAT=\"/a.txt\"\r\n"); CHECK_OUT("+NSTAT:7,0,100\r\n"); clear_out();
+    send("AT+NSTAT=\"/d\"\r\n"); CHECK_OUT("+NSTAT:0,1,0"); clear_out();
+    send("AT+NDIR=\"/\"\r\n"); CHECK_OUT("+NDIR:\"d\",0,1\r\n+NDIR:\"q'.t\",5,0\r\n\r\nOK"); clear_out();
+    send("AT+NMKDIR=\"/n\"\r\n"); CHECK_OUT("OK"); clear_out();
+    send("AT+NRMDIR=\"/n\"\r\n"); CHECK_OUT("OK"); clear_out();
+    send("AT+NREN=\"/a.txt\",\"/b.txt\"\r\n"); CHECK_OUT("OK"); clear_out();
+    send("AT+NDEL=\"/a.txt\"\r\n"); CHECK_OUT("OK"); CHECK(!NF.exists); clear_out();
+    send("AT+NDEL=\"/a.txt\"\r\n"); CHECK_OUT("+NERR:2,\"ENOENT\""); CHECK_OUT("ERROR"); clear_out();
+    send("AT+NOPEN=\"/a.txt\"\r\n"); CHECK_OUT("+NERR:2,\"ENOENT\""); clear_out();
+    /* arguments */
+    send("AT+NREAD=7,513\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+NWRITE=7,0\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+NOPEN=\"/a.txt\",4\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+NMOUNT=\"\"\r\n"); CHECK_OUT("ERROR"); clear_out();
+    /* serveur muet : délai dépassé (4 essais) */
+    NF.silent = true;
+    int before = NF.calls;
+    send("AT+NSTAT=\"/a.txt\"\r\n"); CHECK_OUT("+NERR:256,\"TIMEOUT\""); CHECK(NF.calls - before == TNFS_TRIES); clear_out();
+    NF.silent = false;
+    send("AT+NUMOUNT\r\n"); CHECK_OUT("OK"); clear_out();
+    send("AT+NSTAT=\"/a.txt\"\r\n"); CHECK_OUT("NOTMOUNTED"); clear_out();
+    /* filtrage d'hôtes, Wi-Fi absent, plateforme sans TNFS */
+    modem.cfg.hosts_enforce = 1;
+    send("AT+NMOUNT=\"files.example\"\r\n"); CHECK_OUT("host not allowed"); clear_out();
+    send("AT+NLOG?\r\n"); CHECK_OUT("\"NFS\",\"files.example\",16384,refused"); clear_out();
+    modem.cfg.hosts_enforce = 0;
+    M.wifi_up = false;
+    send("AT+NMOUNT=\"files.example\"\r\n"); CHECK_OUT("no ip"); clear_out();
+    struct at_modem_ops no_nfs = ops;
+    no_nfs.nfs_xfer = NULL;
+    at_modem_init(&modem, &no_nfs, NULL);
+    M.wifi_up = true;
+    send("AT+NMOUNT=\"files.example\"\r\n"); CHECK_OUT("ERROR"); clear_out();
+    /* les commandes N… voisines restent atteignables */
+    send("AT+NHOSTS?\r\n"); CHECK_OUT("+NHOSTS:0"); clear_out();
+}
+
 int main(void)
 {
     test_basic();
@@ -1035,6 +1152,7 @@ int main(void)
     test_tnfs_config();
     test_host_filter();
     test_http();
+    test_nfs();
     test_hayes();
     test_tls();
     test_config_persist();

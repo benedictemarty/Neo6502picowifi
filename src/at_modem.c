@@ -294,6 +294,7 @@ void at_modem_init(struct at_modem *m, const struct at_modem_ops *ops,
     }
     m->s2 = '+';
     m->s12 = 50;
+    m->nfs_wfd = -1;
 }
 
 /* --------------------------------------------------------- Wi-Fi/IP */
@@ -655,6 +656,168 @@ static void http_read(struct at_modem *m, const char *p)
     }
 }
 
+/* ------------------------------------------- fichiers TNFS (US-T16) */
+
+static int nfs_xfer_adapter(void *ctx, const uint8_t *req, size_t len, uint8_t *resp, size_t cap, uint32_t t)
+{
+    struct at_modem *m = ctx;
+    return m->ops->nfs_xfer(m->ops->ctx, m->nfs_host, m->nfs_port, req, len, resp, cap, t);
+}
+
+static void nfs_sleep_adapter(void *ctx, uint32_t ms)
+{
+    struct at_modem *m = ctx;
+    uint32_t t0 = now(m);
+    while (now(m) - t0 < ms) m->ops->idle(m->ops->ctx);
+}
+
+/* +NERR:<code>,"<nom>" puis ERROR ; codes locaux rendus positifs (256…) */
+static void nfs_err(struct at_modem *m, int code)
+{
+    outf(m, "+NERR:%d,\"%s\"\r\n", code >= 0 ? code : 255 - code, tnfs_strerror(code));
+    error(m);
+}
+
+static bool nfs_dir_line(void *ctx, const struct tnfs_dirent *e)
+{
+    struct at_modem *m = ctx;
+    char name[TNFS_PATH_MAX + 1];
+    size_t i = 0;
+    for (; e->name[i] && i < TNFS_PATH_MAX; i++) name[i] = e->name[i] == '"' ? '\'' : e->name[i];
+    name[i] = 0;
+    outf(m, "+NDIR:\"%.150s\",%lu,%d\r\n", name, (unsigned long)e->size, e->is_dir ? 1 : 0);
+    return true;
+}
+
+static void nfs_write_done(struct at_modem *m)
+{
+    size_t w = 0;
+    int r = tnfs_write(&m->nfs, (uint8_t)m->nfs_wfd, m->send_buf, m->send_len, &w);
+    m->nfs_wfd = -1;
+    m->mode = AT_MODE_COMMAND;
+    m->line_len = 0;
+    if (r != TNFS_OK) { nfs_err(m, r); return; }
+    outf(m, "\r\n+NWRITE:%u\r\n", (unsigned)w);
+    ok(m);
+}
+
+/* Commandes AT+N… ; false si cmd n'en est pas une (suite de plus_command). */
+static bool nfs_command(struct at_modem *m, const char *cmd)
+{
+    const char *p;
+    long h, n, v;
+    char path[AT_LINE_MAX], path2[AT_LINE_MAX];
+    int r;
+    struct tnfs_client *c = &m->nfs;
+    if (starts(cmd, "NMOUNT=", &p)) {
+        /* AT+NMOUNT="hôte"[,port[,"/chemin"[,"user","pass"]]] */
+        char host[AT_HOST_MAX + 1], user[33] = "", pass[65] = "";
+        long port = 16384;
+        strcpy(path, "/");
+        if (!m->ops->nfs_xfer || !m->ops->idle || !parse_quoted(&p, host, sizeof host) || !host[0]) { error(m); return true; }
+        if (skip_comma(&p)) {
+            if (!parse_int(&p, &port) || port < 1 || port > 65535) { error(m); return true; }
+            if (skip_comma(&p)) {
+                if (!parse_quoted(&p, path, sizeof path)) { error(m); return true; }
+                if (skip_comma(&p) && (!parse_quoted(&p, user, sizeof user) || !skip_comma(&p)
+                                       || !parse_quoted(&p, pass, sizeof pass))) { error(m); return true; }
+            }
+        }
+        if (*p) { error(m); return true; }
+        if (!m->ops->wifi_connected(m->ops->ctx)) { out(m, "no ip\r\n"); error(m); return true; }
+        if (!check_host(m, "NFS", host, (uint16_t)port)) { out(m, "host not allowed\r\n"); error(m); return true; }
+        if (c->mounted) tnfs_umount(c);
+        strcpy(m->nfs_host, host);
+        m->nfs_port = (uint16_t)port;
+        tnfs_init(c, nfs_xfer_adapter, nfs_sleep_adapter, m);
+        r = tnfs_mount(c, path, user, pass);
+        if (r != TNFS_OK) { nfs_err(m, r); return true; }
+        outf(m, "+NMOUNT:%u.%u\r\n", c->version >> 8, c->version & 0xff);
+        ok(m);
+    } else if (!strcmp(cmd, "NUMOUNT")) {
+        tnfs_umount(c);
+        ok(m);
+    } else if (!strcmp(cmd, "NMOUNT?")) {
+        if (c->mounted) outf(m, "+NMOUNT:\"%s\",%u\r\n", m->nfs_host, m->nfs_port);
+        else out(m, "+NMOUNT:\"\",0\r\n");
+        ok(m);
+    } else if (starts(cmd, "NOPEN=", &p)) {
+        /* mode 0 lecture, 1 écriture (création, troncature), 2 ajout, 3 lecture/écriture */
+        static const uint16_t flags[4] = {
+            TNFS_O_RDONLY, TNFS_O_WRONLY | TNFS_O_CREAT | TNFS_O_TRUNC,
+            TNFS_O_WRONLY | TNFS_O_CREAT | TNFS_O_APPEND, TNFS_O_RDWR | TNFS_O_CREAT };
+        long mode = 0;
+        if (!parse_quoted(&p, path, sizeof path)) { error(m); return true; }
+        if (skip_comma(&p) && (!parse_int(&p, &mode) || mode < 0 || mode > 3)) { error(m); return true; }
+        if (*p) { error(m); return true; }
+        uint8_t fd;
+        r = tnfs_open(c, path, flags[mode], 0644, &fd);
+        if (r != TNFS_OK) { nfs_err(m, r); return true; }
+        outf(m, "+NOPEN:%u\r\n", fd);
+        ok(m);
+    } else if (starts(cmd, "NREAD=", &p)) {
+        if (!parse_int(&p, &h) || h < 0 || h > 255 || !skip_comma(&p) || !parse_int(&p, &n)
+            || n < 1 || n > TNFS_IO_MAX || *p) { error(m); return true; }
+        size_t got = 0;
+        r = tnfs_read(c, (uint8_t)h, m->send_buf, (size_t)n, &got);
+        if (r != TNFS_OK && r != TNFS_EEOF) { nfs_err(m, r); return true; }
+        outf(m, "+NREAD:%u:", (unsigned)got);      /* 0 = fin du fichier */
+        m->ops->write(m->ops->ctx, m->send_buf, got);
+        ok(m);
+    } else if (starts(cmd, "NWRITE=", &p)) {
+        if (!parse_int(&p, &h) || h < 0 || h > 255 || !skip_comma(&p) || !parse_int(&p, &n)
+            || n < 1 || n > TNFS_IO_MAX || *p) { error(m); return true; }
+        if (!c->mounted) { nfs_err(m, TNFS_ERR_MOUNT); return true; }
+        m->nfs_wfd = (int)h;
+        m->send_expected = (size_t)n;
+        m->send_len = 0;
+        m->mode = AT_MODE_CIPSEND;
+        out(m, "\r\nOK\r\n> ");
+    } else if (starts(cmd, "NCLOSE=", &p)) {
+        if (!parse_int(&p, &h) || h < 0 || h > 255 || *p) { error(m); return true; }
+        r = tnfs_close(c, (uint8_t)h);
+        if (r != TNFS_OK) { nfs_err(m, r); return true; }
+        ok(m);
+    } else if (starts(cmd, "NSEEK=", &p)) {
+        long from = 0;
+        if (!parse_int(&p, &h) || h < 0 || h > 255 || !skip_comma(&p) || !parse_int(&p, &v)) { error(m); return true; }
+        if (skip_comma(&p) && (!parse_int(&p, &from) || from < 0 || from > 2)) { error(m); return true; }
+        if (*p) { error(m); return true; }
+        uint32_t pos = 0;
+        r = tnfs_lseek(c, (uint8_t)h, (int32_t)v, (uint8_t)from, &pos);
+        if (r != TNFS_OK) { nfs_err(m, r); return true; }
+        outf(m, "+NSEEK:%lu\r\n", (unsigned long)pos);
+        ok(m);
+    } else if (starts(cmd, "NSTAT=", &p)) {
+        struct tnfs_stat st;
+        if (!parse_quoted(&p, path, sizeof path) || *p) { error(m); return true; }
+        r = tnfs_stat(c, path, &st);
+        if (r != TNFS_OK) { nfs_err(m, r); return true; }
+        outf(m, "+NSTAT:%lu,%d,%lu\r\n", (unsigned long)st.size, st.is_dir ? 1 : 0, (unsigned long)st.mtime);
+        ok(m);
+    } else if (starts(cmd, "NDIR=", &p)) {
+        if (!parse_quoted(&p, path, sizeof path) || *p) { error(m); return true; }
+        r = tnfs_list(c, path, nfs_dir_line, m);
+        if (r != TNFS_OK) { nfs_err(m, r); return true; }
+        ok(m);
+    } else if (starts(cmd, "NDEL=", &p) || starts(cmd, "NMKDIR=", &p) || starts(cmd, "NRMDIR=", &p)) {
+        if (!parse_quoted(&p, path, sizeof path) || *p) { error(m); return true; }
+        r = cmd[1] == 'D' ? tnfs_unlink(c, path) : cmd[1] == 'M' ? tnfs_mkdir(c, path) : tnfs_rmdir(c, path);
+        if (r != TNFS_OK) { nfs_err(m, r); return true; }
+        ok(m);
+    } else if (starts(cmd, "NREN=", &p)) {
+        if (!parse_quoted(&p, path, sizeof path) || !skip_comma(&p) || !parse_quoted(&p, path2, sizeof path2) || *p) {
+            error(m); return true;
+        }
+        r = tnfs_rename(c, path, path2);
+        if (r != TNFS_OK) { nfs_err(m, r); return true; }
+        ok(m);
+    } else {
+        return false;
+    }
+    return true;
+}
+
 /* US-T12 : avec le filtrage actif, un programme 6502 ne doit pas pouvoir
    détourner un hôte autorisé (autre réseau Wi-Fi, DNS ou passerelle à lui) :
    ces réglages ne changent alors que depuis la page du point d'accès, et le
@@ -934,6 +1097,8 @@ static void plus_command(struct at_modem *m, const char *cmd)
     } else if (!strcmp(cmd, "HTTPCLOSE")) {
         if (m->http.active) hangup(m);
         ok(m);
+    } else if (starts(cmd, "N", NULL) && nfs_command(m, cmd)) {
+        /* US-T16 : AT+NMOUNT, AT+NOPEN… (traité) */
     } else if (!strcmp(cmd, "NHOSTS?")) {
         /* US-T12 : lecture seule ; modification depuis la page du point d'accès */
         outf(m, "+NHOSTS:%u", m->cfg.hosts_enforce);
@@ -1120,7 +1285,9 @@ void at_modem_input(struct at_modem *m, const uint8_t *data, size_t len)
         }
         case AT_MODE_CIPSEND:
             m->send_buf[m->send_len++] = c;
-            if (m->send_len == m->send_expected) {
+            if (m->send_len == m->send_expected && m->nfs_wfd >= 0) {
+                nfs_write_done(m);                 /* AT+NWRITE : données reçues */
+            } else if (m->send_len == m->send_expected) {
                 int r = m->ops->tcp_send(m->ops->ctx, m->send_buf, m->send_len);
                 outf(m, "\r\nRecv %u bytes\r\n", (unsigned)m->send_len);
                 out(m, r == AT_NET_OK ? "\r\nSEND OK\r\n" : "\r\nSEND FAIL\r\n");

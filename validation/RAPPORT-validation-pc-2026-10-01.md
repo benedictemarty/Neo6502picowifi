@@ -1,6 +1,6 @@
 # Rapport de validation — modem simulé sur PC — 2026-10-01
 
-**78/78 étapes réussies.** Cible : `pc/pcmodem` (cœur du firmware `src/at_modem.c`,
+**92/92 étapes réussies** (78/78 au premier passage complet ; puis 92/92 avec US-T16 et `--tnfsd`). Cible : `pc/pcmodem` (cœur du firmware `src/at_modem.c`,
 `http_parse.c`, `tnfs_link.c` inchangés ; TLS = mbedTLS du SDK avec la configuration du
 firmware, `roots_store` et `roots_ca_cb`), sur le réseau du PC, Internet réel.
 Code : branche `main` après `97ac2c2` + corrections de ce rapport. Version annoncée : 0.3.1
@@ -11,6 +11,8 @@ Commande :
 make -C pc PICO_SDK_PATH=~/pico-sdk-internal
 pc/pcmodem -l /tmp/neomodem -T /tmp/neotnfs -c /tmp/pcm.cfg &
 python3 validation/validate.py /tmp/neomodem --pc --tnfs-pty /tmp/neotnfs
+# avec tnfsd local (spectranet/tnfs/tnfsd, version 23.0207.1) :
+python3 validation/validate.py /tmp/neomodem --pc --tnfs-pty /tmp/neotnfs --nfs 127.0.0.1 --tnfsd 127.0.0.1
 ```
 
 ## Ce que ce rapport prouve et ne prouve pas
@@ -33,7 +35,7 @@ python3 validation/validate.py /tmp/neomodem --pc --tnfs-pty /tmp/neotnfs
    seuls le statut et les en-têtes utiles sont gardés (taille totale illimitée, RAM inchangée).
 3. Deux attentes du script lui-même (page de 95 o pour un `Range 0-99`, limite de lecture).
 
-## Résultats
+## Résultats (passage du 2026-10-01 20:06, avec --nfs et --tnfsd)
 
 | Étape | Résultat | Détail |
 |---|---|---|
@@ -45,14 +47,14 @@ python3 validation/validate.py /tmp/neomodem --pc --tnfs-pty /tmp/neotnfs
 | AT+CWMODE? → +CWMODE:1 | OK |  |
 | Wi-Fi associé (STATUS:2..4) | OK | STATUS:2 |
 | AT+CIFSR (IP + MAC) | OK | +CIFSR:STAIP,"10.57.1.59" |
-| Heure SNTP acquise | OK | +CIPSNTPTIME:Thu Oct 01 17:47:27 2026 |
+| Heure SNTP acquise | OK | +CIPSNTPTIME:Thu Oct 01 18:03:56 2026 |
 | AT+CWJAP_CUR? (ssid, bssid, canal, rssi) | OK |  |
 | AT+CIPSTA_CUR? ip/gateway/netmask | OK |  |
 | AT+CIPDNS_CUR? | OK |  |
 | AT+CWDHCP_DEF? | OK |  |
 | AT+CIPSSLCCONF? → 2 (CA vérifiée) | OK |  |
 | AT+CWLAP liste des réseaux | OK | 1 réseaux en 0.9s |
-| AT+PING | OK | +158 |
+| AT+PING | OK | +101 |
 | CIPSTART TCP → CONNECT | OK | 0.9s |
 | STATUS:3 (TCP ouvert) | OK |  |
 | CIPSEND → OK > | OK |  |
@@ -61,22 +63,22 @@ python3 validation/validate.py /tmp/neomodem --pc --tnfs-pty /tmp/neotnfs
 | SSL mimuma.pl (Let's Encrypt) → CONNECT | OK | 1.2s |
 | HTTPS : réponse déchiffrée en +IPD | OK |  |
 | SSL mimuma.pl 2e fois (reprise de session) | OK | 1.2s |
-| SSL badssl.com (ISRG Root X1) → CONNECT | OK | 1.5s |
-| SSL www.digicert.com (DigiCert Global Root G2) → CONNECT | OK | 1.2s, heap: ? |
+| SSL badssl.com (ISRG Root X1) → CONNECT | OK | 6.6s |
+| SSL www.digicert.com (DigiCert Global Root G2) → CONNECT | OK | 1.5s, heap: ? |
 | SSL github.com (Sectigo Public Server Authentication Root E46) → CONNECT | OK | 1.2s, heap: ? |
-| REFUS racine inconnue (untrusted-root.badssl.com) | OK | 1.2s |
+| REFUS racine inconnue (untrusted-root.badssl.com) | OK | 1.5s |
 | REFUS nom d'hôte faux (wrong.host.badssl.com) | OK | 1.2s |
 | REFUS certificat expiré (expired.badssl.com, racine pourtant présente) | OK | 1.2s |
-| REFUS IP directe (nom non vérifiable) | OK | 0.9s |
+| REFUS IP directe (nom non vérifiable) | OK | 1.2s |
 | DNS Fail sur hôte inexistant | OK |  |
 | AT+TLSPORT=443 | OK |  |
 | AT+TLSPORT? → 443 | OK |  |
 | bloc 1 : CONNECT + réponse + CLOSED | OK | connexion 1.2s, réponse 0.9s |
 | bloc 2 : CONNECT + réponse + CLOSED | OK | connexion 1.2s, réponse 0.9s |
-| bloc 3 : CONNECT + réponse + CLOSED | OK | connexion 1.2s, réponse 0.9s |
+| bloc 3 : CONNECT + réponse + CLOSED | OK | connexion 1.2s, réponse 2.1s |
 | AT+TLSPORT=0 (effacement) | OK |  |
 | ATDT telehack.com:23 → CONNECT | OK | 1.2s |
-| données transparentes reçues (bannière) | OK | 1201 octets |
+| données transparentes reçues (bannière) | OK | 1209 octets |
 | écho serveur à "date" | OK |  |
 | +++ → OK (retour commande) | OK |  |
 | STATUS:3 en mode commande | OK |  |
@@ -90,7 +92,7 @@ python3 validation/validate.py /tmp/neomodem --pc --tnfs-pty /tmp/neotnfs
 | le PC reçoit la ligne entière | OK | b'salut du Neo6502\r\n' |
 | NO CARRIER à la fermeture par le PC | OK |  |
 | ATS12? → 050 | OK |  |
-| CIPSTART "UDP" → CONNECT | OK | PC 10.57.1.59:59345 |
+| CIPSTART "UDP" → CONNECT | OK | PC 10.57.1.59:42804 |
 | CIPSTATUS : lien "UDP" | OK |  |
 | datagramme de 1 o : SEND OK puis un +IPD identique | OK | 1 +IPD |
 | datagramme de 532 o : SEND OK puis un +IPD identique | OK | 1 +IPD |
@@ -99,10 +101,11 @@ python3 validation/validate.py /tmp/neomodem --pc --tnfs-pty /tmp/neotnfs
 | CIPSEND=1473 en UDP → ERROR | OK |  |
 | ATO sur lien UDP → NO CARRIER | OK |  |
 | CIPCLOSE → CLOSED | OK |  |
+| TNFS MOUNT sur 127.0.0.1:16384 → réponse, statut 0 | OK | 67450000000201e8 |
 | HTTPGET http://mimuma.pl/ → 200, corps complet | OK | 200, annoncé 95, lu 95 o en 1 lectures, 1.5s |
 | HTTPGET https://mimuma.pl/ (TLS) → 200, corps complet | OK | 200, annoncé 95, lu 95 o, 1.2s |
 | Range 0-99 → 206, au plus 100 octets, taille annoncée lue | OK | 206, annoncé 95, lu 95 o |
-| redirection http://github.com → https, 200, 64 Ko de corps lus (en-têtes > 4 Ko, TLS 16 Ko) | OK | 200, annoncé -1, lu 65536 o, 2.1s |
+| redirection http://github.com → https, 200, 64 Ko de corps lus (en-têtes > 4 Ko, TLS 16 Ko) | OK | 200, annoncé -1, lu 65536 o, 1.5s |
 | HTTPCLOSE → OK | OK |  |
 | URL invalide → bad URL | OK |  |
 | après HTTP, CIPSTART/CIPCLOSE normaux | OK |  |
@@ -115,3 +118,16 @@ python3 validation/validate.py /tmp/neomodem --pc --tnfs-pty /tmp/neotnfs
 | 3 trames (5, 532, 1472 o) aller-retour par le PC, identiques | OK | 3/3 |
 | longueur invalide → resynchronisation, trame suivante servie | OK |  |
 | lien AT toujours vivant pendant TNFS (CIPCLOSE → CLOSED) | OK |  |
+| AT+NMOUNT → version du serveur | OK | 1.2, 0.9s |
+| AT+NOPEN écriture → descripteur | OK |  |
+| AT+NWRITE 512 + 300 octets (binaires) | OK |  |
+| AT+NCLOSE | OK |  |
+| AT+NSTAT → 812 octets, fichier | OK | +NSTAT:812,0,1790877989 |
+| AT+NREAD jusqu'à la fin : contenu identique | OK | 812 o en 3 lectures |
+| AT+NSEEK=…,800 → +NSEEK:800 | OK |  |
+| lecture après déplacement : 12 derniers octets | OK |  |
+| AT+NDIR="/" liste le fichier | OK | 1 entrées |
+| AT+NREN | OK |  |
+| AT+NDEL | OK |  |
+| fichier effacé → +NERR:2,"ENOENT" | OK |  |
+| AT+NUMOUNT | OK |  |

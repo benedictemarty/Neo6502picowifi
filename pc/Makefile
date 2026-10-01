@@ -7,8 +7,8 @@ PYTHON ?= python3
 VERSION := $(shell cat ../VERSION)
 MBEDTLS_DIR ?= $(PICO_SDK_PATH)/lib/mbedtls
 HAVE_MBEDTLS := $(wildcard $(MBEDTLS_DIR)/library/ssl_tls.c)
-SRCS = pcmodem.c ../src/at_modem.c ../src/http_parse.c ../src/tnfs_link.c
-HDRS = ../src/at_modem.h ../src/http_parse.h ../src/tnfs_link.h ../VERSION
+SRCS = pcmodem.c ../src/at_modem.c ../src/http_parse.c ../src/tnfs_link.c ../src/tnfs_client.c
+HDRS = ../src/at_modem.h ../src/http_parse.h ../src/tnfs_link.h ../src/tnfs_client.h ../VERSION
 
 ifneq ($(HAVE_MBEDTLS),)
 MBED_CFLAGS = -std=gnu11 -O2 -I. -I$(MBEDTLS_DIR)/include -DMBEDTLS_CONFIG_FILE='"mbedtls_pc_config.h"'

@@ -14,6 +14,8 @@ Usage : python3 validate.py [/dev/ttyACM0] [--quick] [--tnfs-usb] [--tnfsd hôte
   --tnfs-usb : active le second port USB (AT$TNFSUSB=1, redémarrage), le teste,
                puis remet le réglage d'origine (US-T17)
   --tnfsd    : MOUNT TNFS réel contre ce serveur, par l'UDP AT (US-T14)
+  --nfs hôte : fichiers TNFS en AT+N… contre ce tnfsd (US-T16) ; crée puis efface
+               un fichier de test à la racine du serveur
   --pc       : cible = modem simulé sur PC (pc/pcmodem) : saute ce qui n'existe que
                sur la carte (AT+TLSTEST, détails ATI du TLS, reprise de session,
                point d'accès) ; --tnfs-pty <lien> remplace --tnfs-usb
@@ -26,6 +28,7 @@ QUICK = '--quick' in sys.argv
 TNFS_USB = '--tnfs-usb' in sys.argv
 TNFSD = sys.argv[sys.argv.index('--tnfsd') + 1] if '--tnfsd' in sys.argv else None
 PC = '--pc' in sys.argv
+NFS = sys.argv[sys.argv.index('--nfs') + 1] if '--nfs' in sys.argv else None
 TNFS_PTY = sys.argv[sys.argv.index('--tnfs-pty') + 1] if '--tnfs-pty' in sys.argv else None
 PORT = next((a for a in sys.argv[1:] if a.startswith('/') and a != TNFS_PTY), PORT)
 results = []          # (étape, ok, détail)
@@ -396,6 +399,45 @@ if TNFS_USB or TNFS_PTY:
     if was == '0' and not TNFS_PTY:
         cmd('AT$TNFSUSB=0'); ok_rst, st, dt = reboot()
         rec('réglage d\'origine remis (AT$TNFSUSB=0), un seul port USB', ok_rst and not os.path.exists(tnfs_dev))
+
+# ------------------------------------------------------------ 11. fichiers TNFS (US-T16), en option
+if NFS:
+    hd(f'11. Fichiers TNFS en AT+N… (US-T16) — serveur {NFS}')
+    o, dt = cmd(f'AT+NMOUNT="{NFS}"', 15); rec('AT+NMOUNT → version du serveur', '+NMOUNT:' in o and 'OK' in o,
+                                              (o.split('+NMOUNT:')[1].split()[0] if '+NMOUNT:' in o else o.strip()) + f', {dt:.1f}s')
+    name = f'/validate-{int(time.time())}.bin'
+    data = bytes((i * 31 + 5) & 0xff for i in range(812))
+    o, _ = cmd(f'AT+NOPEN="{name}",1'); h = o.split('+NOPEN:')[1].split()[0] if '+NOPEN:' in o else '0'
+    rec('AT+NOPEN écriture → descripteur', '+NOPEN:' in o)
+    okw = True
+    for off in (0, 512):
+        part = data[off:off + 512]
+        cmd(f'AT+NWRITE={h},{len(part)}', 2, (b'> ',))
+        raw = cmd_raw(part, 5, lambda b: b'\r\nOK\r\n' in b or b'ERROR' in b)
+        okw = okw and b'+NWRITE:%d' % len(part) in raw
+    rec('AT+NWRITE 512 + 300 octets (binaires)', okw)
+    o, _ = cmd(f'AT+NCLOSE={h}'); rec('AT+NCLOSE', 'OK' in o)
+    o, _ = cmd(f'AT+NSTAT="{name}"'); rec('AT+NSTAT → 812 octets, fichier', '+NSTAT:812,0,' in o, o.strip().splitlines()[0] if o.strip() else '')
+    o, _ = cmd(f'AT+NOPEN="{name}"'); h = o.split('+NOPEN:')[1].split()[0] if '+NOPEN:' in o else '0'
+    back, reads = b'', 0
+    while reads < 10:
+        raw = cmd_raw(b'AT+NREAD=%s,512\r\n' % h.encode(), 5,
+                      lambda b: (b'+NREAD:' in b and b.find(b':', b.find(b'+NREAD:') + 7) > 0 and
+                                 len(b) >= b.find(b':', b.find(b'+NREAD:') + 7) + 1 + int(b[b.find(b'+NREAD:') + 7:b.find(b':', b.find(b'+NREAD:') + 7)] or 0) + 6) or b'ERROR' in b)
+        j = raw.find(b'+NREAD:'); k = raw.find(b':', j + 7)
+        if j < 0 or k < 0: break
+        cnt = int(raw[j + 7:k]); back += raw[k + 1:k + 1 + cnt]; reads += 1
+        if cnt == 0: break
+    rec('AT+NREAD jusqu\'à la fin : contenu identique', back == data, f'{len(back)} o en {reads} lectures')
+    o, _ = cmd(f'AT+NSEEK={h},800'); rec('AT+NSEEK=…,800 → +NSEEK:800', '+NSEEK:800' in o)
+    raw = cmd_raw(b'AT+NREAD=%s,512\r\n' % h.encode(), 5, lambda b: b'\r\nOK\r\n' in b or b'ERROR' in b)
+    rec('lecture après déplacement : 12 derniers octets', b'+NREAD:12:' + data[800:] in raw)
+    cmd(f'AT+NCLOSE={h}')
+    o, _ = cmd('AT+NDIR="/"', 10); rec('AT+NDIR="/" liste le fichier', f'+NDIR:"{name[1:]}",812,0' in o, f"{o.count('+NDIR:')} entrées")
+    o, _ = cmd(f'AT+NREN="{name}","{name}.old"'); rec('AT+NREN', 'OK' in o)
+    o, _ = cmd(f'AT+NDEL="{name}.old"'); rec('AT+NDEL', 'OK' in o)
+    o, _ = cmd(f'AT+NSTAT="{name}.old"'); rec('fichier effacé → +NERR:2,"ENOENT"', '+NERR:2,"ENOENT"' in o)
+    o, _ = cmd('AT+NUMOUNT'); rec('AT+NUMOUNT', 'OK' in o)
 
 # ------------------------------------------------------------ rapport
 hd('Résumé')

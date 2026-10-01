@@ -32,7 +32,8 @@ script + rapport, versionnés avec le code).
 | `telehack.com:23` | `CONNECT`, dialogue, `+++`, `ATO`, `ATH` | modem Hayes |
 | PC → Pico `:6502` | `RING`, `ATA`, `NO CARRIER` | appel entrant |
 | PC, serveur d'écho UDP (port libre choisi par le script) | un `+IPD` par datagramme (1, 532, 1472 o ; rafale de 12) | UDP ESP8266 (US-T14) |
-| `--tnfsd hôte[:port]` (facultatif) | réponse au MOUNT, statut 0 | TNFS réel par l'UDP AT (US-T14) ; format du MOUNT écrit d'après la spécification TNFS, **non vérifié contre tnfsd** |
+| `--tnfsd hôte[:port]` (facultatif) | réponse au MOUNT, statut 0 | TNFS réel par l'UDP AT (US-T14) ; vérifié contre tnfsd 23.0207.1 le 2026-10-01 |
+| `--nfs hôte` (facultatif) | montage, écriture 812 o, relecture identique, déplacement, liste, renommage, suppression | fichiers TNFS en `AT+N…` (US-T16) ; crée puis efface `/validate-<horodatage>.bin` sur le serveur |
 | `http://mimuma.pl/`, `https://mimuma.pl/` (+ `Range 0-99`) | `200`, corps complet ; `206`, 100 o | flux HTTP(S) (US-T11) |
 | `http://github.com/` | redirection vers https, `200` | redirections, corps chunked éventuel (US-T11) |
 | `AT+APSETUP=1` | SSID `Neo6502-modem-XXXX`, station toujours associée, `CIPSTART` sortant fonctionne | point d'accès sans détourner la route par défaut (US-W6) |
@@ -40,7 +41,7 @@ script + rapport, versionnés avec le code).
 
 ## Exécution
 ```
-python3 validation/validate.py [/dev/ttyACM0] [--quick] [--tnfs-usb] [--tnfsd hôte[:port]]
+python3 validation/validate.py [/dev/ttyACM0] [--quick] [--tnfs-usb] [--tnfsd hôte[:port]] [--nfs hôte]
 ```
 Le pare-feu du PC doit laisser entrer l'UDP sur un port quelconque (serveur d'écho de
 l'étape 6) et le TCP 6502 (appel entrant).

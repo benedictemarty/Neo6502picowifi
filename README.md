@@ -77,6 +77,13 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `AT+HTTPGET="url"[,début[,fin]]` | requête GET (TLS pour `https://`, redirections suivies, `Range` si début/fin) : `+HTTPGET:<code>,<taille ou -1>,"<type>"`, `OK` ; voir « Flux HTTP(S) » |
 | `AT+HTTPREAD=n` (1 ≤ n ≤ 2048) | `+HTTPREAD:<k>,<suite>:` puis k octets du corps, `OK` ; `suite` = 0 : corps terminé |
 | `AT+HTTPCLOSE` | ferme la session HTTP, `OK` |
+| `AT+NMOUNT="hôte"[,port[,"/chemin"[,"user","pass"]]]` / `?` | monte un serveur TNFS (port 16384 par défaut) : `+NMOUNT:<version>` ; voir « Fichiers distants (TNFS) » |
+| `AT+NOPEN="chemin"[,mode]` | mode 0 lecture (défaut), 1 écriture (création, troncature), 2 ajout, 3 lecture/écriture : `+NOPEN:<h>` |
+| `AT+NREAD=h,n` (n ≤ 512) | `+NREAD:<k>:` puis k octets, `OK` ; k = 0 : fin du fichier |
+| `AT+NWRITE=h,n` (n ≤ 512) | `OK`, `> `, puis après n octets `+NWRITE:<k>`, `OK` |
+| `AT+NCLOSE=h`, `AT+NSEEK=h,pos[,0|1|2]` | fermeture ; déplacement (début, courant, fin) : `+NSEEK:<pos>` |
+| `AT+NSTAT="chemin"`, `AT+NDIR="dossier"` | `+NSTAT:<taille>,<dossier 0|1>,<mtime>` ; une ligne `+NDIR:"nom",<taille>,<0|1>` par entrée |
+| `AT+NDEL`, `AT+NMKDIR`, `AT+NRMDIR="chemin"`, `AT+NREN="de","vers"`, `AT+NUMOUNT` | suppression, dossiers, renommage, démontage |
 | `AT+NHOSTS?` | `+NHOSTS:<actif>,"hôte1",…` : filtrage des hôtes ; **lecture seule** (`AT+NHOSTS=…` → `ERROR`, modifier depuis la page `/hosts`) |
 | `AT+NLOG?` | 16 dernières tentatives : `+NLOG:<âge s>,"TCP|SSL|UDP|DIAL|PING|TNFS|SNTP","hôte",port,allowed|refused` |
 | `AT+APSETUPPWD="…"` / `?` | mot de passe du point d'accès (8 à 63 caractères ASCII imprimables, persistant) ; défaut `neo6502wifi` |
@@ -116,6 +123,31 @@ OK
 - Requête : `GET <chemin> HTTP/1.1`, `Host`, `User-Agent: Neo6502picowifi/<version>`,
   `Accept-Encoding: identity`, `Connection: close`.
 
+## Fichiers distants (TNFS)
+
+Tout programme Neo6502 peut lire et écrire des fichiers sur un serveur **TNFS**
+(`tnfsd` de FujiNet/Spectranet) avec de simples commandes AT : le modem fait le
+protocole (sessions, numéros de séquence, répétitions, `EAGAIN`) ; c'est la base du
+périphérique `N:` (mémo Neo6502Prophet).
+
+```
+AT+NMOUNT="serveur.local"            → +NMOUNT:1.2
+AT+NOPEN="/jeux/tetris.neo"          → +NOPEN:3
+AT+NREAD=3,512                       → +NREAD:512:<512 octets>  …  +NREAD:0:  (fin)
+AT+NCLOSE=3
+AT+NOPEN="/sauve.dat",1  AT+NWRITE=4,100  > <100 octets>  → +NWRITE:100
+AT+NDIR="/jeux"                      → +NDIR:"tetris.neo",20480,0 …
+```
+
+- Erreurs : `+NERR:<code>,"<nom>"` puis `ERROR` ; codes TNFS du serveur (2 `ENOENT`,
+  6 `EBADF`, 9 `EACCES`, 0x21 `EOF`…) ; 256 `TIMEOUT` (pas de réponse après 4 essais de
+  1,5 s), 257 `BADREPLY`, 258 `NOTMOUNTED`, 259 `BADARG`.
+- Lien UDP propre, indépendant de `CIPSTART`/`ATDT` et du port USB TNFS ; le filtrage des
+  hôtes (US-T12) s'applique à `AT+NMOUNT`.
+- Dans `+NDIR`, un `"` dans un nom est rendu par `'` ; liste triée, dossiers d'abord,
+  fichiers cachés omis (options par défaut de `OPENDIRX`).
+- Protocole : spécification TNFS (spectranet/tnfs/tnfs-protocol.md) et constantes de `tnfsd`.
+
 ## Hôtes autorisés (filtrage des connexions)
 
 Pour qu'un programme `.neo` malveillant ne puisse pas envoyer le contenu du stockage
@@ -127,7 +159,7 @@ vers un serveur de son choix, le modem peut n'autoriser qu'une liste d'hôtes
   élargir sa propre liste. En AT : lecture seule (`AT+NHOSTS?`) et journal (`AT+NLOG?`).
 - **Désactivé par défaut** (netsetup, prophet, NeoNavigator inchangés).
 - Filtrage actif : `CIPSTART` (TCP, SSL, UDP), `ATDT`, `AT$TNFS` et le port TNFS,
-  `AT+PING`, `AT+HTTPGET` (et chaque redirection), un nouveau serveur `AT+CIPSNTPCFG` sont refusés (`host not allowed` /
+  `AT+PING`, `AT+HTTPGET` (et chaque redirection), `AT+NMOUNT`, un nouveau serveur `AT+CIPSNTPCFG` sont refusés (`host not allowed` /
   `NO CARRIER`) pour un hôte absent de la liste — le nom est contrôlé **avant** toute
   requête DNS (un nom peut à lui seul transporter des données) ; les **appels entrants**
   sont refusés (`CIPSERVER=1`, `ATA`, réponse automatique) ; les réglages qui permettraient
@@ -260,6 +292,7 @@ défaut = valeur de `netsetup.pas`).
 make -C tests      # cœur du modem (test_at_modem) + dates TLS (test_tls_date) sur PC, gcc + ASan/UBSan
                    # + point d'accès de configuration : DHCP et DNS captif (test_dhcp_server), page (test_web_setup)
                    # + trames du port USB TNFS (test_tnfs_link), analyse HTTP (test_http_parse)
+                   # + client TNFS (test_tnfs_client ; TNFSD=<binaire tnfsd> : session réelle)
                    # + magasin de racines : générateur (test_roots2c.py), recherche (test_roots_store),
                    #   rappel contre mbedTLS (test_roots_ca_cb, exige PICO_SDK_PATH ou MBEDTLS_DIR)
 ```
@@ -302,7 +335,8 @@ python3 validation/validate.py /tmp/neomodem --pc [--tnfs-pty /tmp/neotnfs]
 - Différences : Wi-Fi simulé (le réseau du PC ; `AT+CWJAP` accepte tout SSID), pas de point
   d'accès, pas de reprise de session TLS, dates des certificats vérifiées avec l'horloge du
   PC (pas de SNTP exigé), `AT+PING` par la commande `ping`.
-- Rapport : `validation/RAPPORT-validation-pc-2026-10-01.md` (78/78).
+- Rapport : `validation/RAPPORT-validation-pc-2026-10-01.md` (92/92 avec `--nfs` et `--tnfsd`
+  contre un `tnfsd` local).
 
 ## Structure
 
@@ -316,6 +350,7 @@ src/web_setup.[ch]    page de configuration : HTTP, formulaire, portail captif (
 src/tnfs_link.[ch]    trames du port USB TNFS et file des réponses (portable, testé sur PC)
 src/tnfs_pico.[ch]    port USB TNFS : lien UDP indépendant, DNS non bloquant
 src/http_parse.[ch]   flux HTTP : URL, redirections, en-têtes, « chunked » (portable, testé sur PC)
+src/tnfs_client.[ch]  client TNFS des commandes AT+N… (portable, testé sur PC et contre tnfsd)
 src/tls_date.[ch]     date civile sans gmtime_r (vérification des dates de certificats)
 src/mbedtls_config.h  configuration mbedTLS (client TLS 1.2)
 certs/roots.pem       racines de confiance (magasin Mozilla) ; tools/roots2c.py les compile

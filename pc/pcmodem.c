@@ -403,6 +403,33 @@ static void op_reset(void *c)
     write_all(pty_at, (const uint8_t *)ready, sizeof ready - 1);
 }
 
+/* US-T16 : échange TNFS des commandes AT+N… (socket UDP propre) */
+static int nfs_fd = -1;
+static char nfs_key[AT_HOST_MAX + 8];
+
+static int op_nfs_xfer(void *c, const char *host, uint16_t port, const uint8_t *req, size_t len,
+                       uint8_t *resp, size_t cap, uint32_t timeout_ms)
+{
+    (void)c;
+    char key[sizeof nfs_key];
+    snprintf(key, sizeof key, "%s:%u", host, port);
+    if (nfs_fd < 0 || strcmp(key, nfs_key)) {
+        if (nfs_fd >= 0) close(nfs_fd);
+        nfs_fd = -1;
+        struct sockaddr_storage sa;
+        socklen_t sl;
+        if (!resolve(host, port, SOCK_DGRAM, &sa, &sl)) return -1;
+        nfs_fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (connect(nfs_fd, (struct sockaddr *)&sa, sl)) { close(nfs_fd); nfs_fd = -1; return -1; }
+        strcpy(nfs_key, key);
+    }
+    if (req && send(nfs_fd, req, len, 0) != (ssize_t)len) return -1;
+    struct pollfd p = { nfs_fd, POLLIN, 0 };
+    if (poll(&p, 1, (int)timeout_ms) <= 0) return -1;
+    ssize_t k = recv(nfs_fd, resp, cap, 0);
+    return k < 0 ? -1 : (int)k;
+}
+
 static const char *op_version(void *c) { (void)c; return PCMODEM_VERSION; }
 static const char *op_build(void *c) { (void)c; return "pcmodem (simulation PC)"; }
 static void pump(int timeout_ms);
@@ -416,7 +443,7 @@ static const struct at_modem_ops ops = {
     .tcp_connected = op_connected, .tcp_listen = op_listen, .tcp_accept = op_accept,
     .config_save = op_save, .sntp_time = op_sntp, .ping = op_ping, .reset = op_reset,
     .version = op_version, .build = op_build,
-    .udp_connect = op_udp_connect, .idle = op_idle,
+    .udp_connect = op_udp_connect, .idle = op_idle, .nfs_xfer = op_nfs_xfer,
 #ifndef PCMODEM_NO_TLS
     .tls_info = op_tls_info,
 #endif
