@@ -487,6 +487,19 @@ static int pop_byte(struct at_modem *m)
     return rx_pop(m, &b, 1) ? b : -1;
 }
 
+/* En-têtes de réponse gardés pour http_resp_parse ; les autres sont sautés. */
+static bool header_wanted(const char *l, size_t n)
+{
+    static const char *const wanted[] = { "content-length:", "transfer-encoding:", "location:", "content-type:" };
+    for (size_t i = 0; i < sizeof wanted / sizeof wanted[0]; i++) {
+        size_t k = strlen(wanted[i]), j = 0;
+        if (n < k) continue;
+        while (j < k && tolower((unsigned char)l[j]) == wanted[i][j]) j++;
+        if (j == k) return true;
+    }
+    return false;
+}
+
 /* Messages d'échec de connexion, comme AT+CIPSTART. */
 static void connect_error(struct at_modem *m, int r)
 {
@@ -512,7 +525,8 @@ static void http_fail(struct at_modem *m, const char *why)
 static void http_get(struct at_modem *m, const char *p)
 {
     static char url[AT_LINE_MAX];
-    static char hdr[HTTP_HDR_MAX];
+    static char hdr[HTTP_HDR_MAX];          /* statut + en-têtes utiles seulement */
+    static char line[HTTP_LINE_MAX];
     static struct http_resp resp;
     long from = -1, to = -1;
     struct http_url u;
@@ -551,15 +565,33 @@ static void http_get(struct at_modem *m, const char *p)
             http_fail(m, "send failed\r\n"); return;
         }
 
-        /* en-têtes : jusqu'à la ligne vide ; la suite reste dans le tampon */
-        size_t hl = 0;
+        /* en-têtes : lus ligne par ligne jusqu'à la ligne vide (la suite reste
+           dans le tampon) ; seuls la ligne de statut et les en-têtes utiles sont
+           gardés, la taille totale n'est donc pas limitée (github.com : > 4 Ko) */
+        size_t hl = 0, ll = 0;
+        bool first = true, skipping = false;
         uint32_t t0 = now(m);
         for (;;) {
             int b = pop_byte(m);
             if (b >= 0) {
-                if (hl == sizeof hdr) { http_fail(m, "HTTP header too large\r\n"); return; }
-                hdr[hl++] = (char)b;
-                if (hl >= 4 && !memcmp(hdr + hl - 4, "\r\n\r\n", 4)) break;
+                if (!skipping) {
+                    if (ll == sizeof line) {
+                        if (first || header_wanted(line, ll)) { http_fail(m, "HTTP header too large\r\n"); return; }
+                        skipping = true;                       /* longue ligne sans intérêt */
+                    } else {
+                        line[ll++] = (char)b;
+                    }
+                }
+                if (b != '\n') continue;
+                bool blank = !skipping && ll <= 2;
+                if (!skipping && (first || blank || header_wanted(line, ll))) {
+                    if (hl + ll > sizeof hdr) { http_fail(m, "HTTP header too large\r\n"); return; }
+                    memcpy(hdr + hl, line, ll);
+                    hl += ll;
+                }
+                first = skipping = false;
+                ll = 0;
+                if (blank) break;
                 continue;
             }
             if (m->remote_closed) { http_fail(m, "connection closed\r\n"); return; }

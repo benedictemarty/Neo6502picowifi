@@ -13,7 +13,8 @@
 
 #define HTTP_HOST_MAX  64
 #define HTTP_PATH_MAX  240
-#define HTTP_HDR_MAX   2048    /* en-têtes de réponse acceptés */
+#define HTTP_HDR_MAX   2048    /* statut + en-têtes utiles gardés (les autres sont sautés) */
+#define HTTP_LINE_MAX  512     /* ligne d'en-tête utile la plus longue acceptée */
 #define HTTP_TYPE_MAX  64
 
 struct http_url {

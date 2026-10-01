@@ -282,6 +282,28 @@ nom faux, expiré, IP), Hayes, appel entrant.
 Prérequis : Wi-Fi provisionné une fois avec `screen /dev/ttyACM0 115200` et
 `AT+CWJAP_DEF="ssid","pass"`.
 
+## Modem simulé sur PC
+
+`pc/pcmodem` fait tourner le cœur du firmware (`src/at_modem.c`, `http_parse.c`,
+`tnfs_link.c`, sans modification) sur le réseau du PC, exposé comme port série
+virtuel : validation sans carte, et modem de référence pour les émulateurs
+(reload, Phosphoneo…).
+
+```
+make -C pc PICO_SDK_PATH=~/pico-sdk-internal    # TLS : mbedTLS du SDK, config du firmware
+pc/pcmodem -l /tmp/neomodem [-T /tmp/neotnfs] [-c pcmodem.cfg]
+python3 validation/validate.py /tmp/neomodem --pc [--tnfs-pty /tmp/neotnfs]
+```
+
+- `-l` : lien vers le port AT ; `-T` : second port « TNFS » (trames longueur + datagramme) ;
+  `-c` : configuration persistante (fichier).
+- TLS avec les mêmes suites, le même magasin de racines et le même rappel `roots_ca_cb`
+  que le firmware ; sans `PICO_SDK_PATH`, construit sans TLS (signalé).
+- Différences : Wi-Fi simulé (le réseau du PC ; `AT+CWJAP` accepte tout SSID), pas de point
+  d'accès, pas de reprise de session TLS, dates des certificats vérifiées avec l'horloge du
+  PC (pas de SNTP exigé), `AT+PING` par la commande `ping`.
+- Rapport : `validation/RAPPORT-validation-pc-2026-10-01.md` (78/78).
+
 ## Structure
 
 ```
@@ -302,6 +324,7 @@ src/roots_ca_cb.[ch]  rappel mbedTLS : racines décodées à la demande
 src/main.c            transports USB CDC + UART0, boucle principale, LED
 src/usb_descriptors.c, tusb_config.h, lwipopts.h
 tests/                tests unitaires PC
+pc/                   modem simulé sur PC (pcmodem.c, config mbedTLS PC)
 validation/           protocole, script et rapports de validation sur carte
 docs/BACKLOG.md       backlog agile ; CHANGELOG.md — versions = `AT+GMR` et tags `vX.Y.Z`
 VERSION               version (semver) ; cmake/build_id.cmake : identifiant de build ; tools/release.sh

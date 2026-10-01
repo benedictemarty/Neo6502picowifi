@@ -54,6 +54,12 @@ copie de rectangle (US16).
 étude (pile réseau sur le cœur 1 : réactivité série pendant un handshake, tas avec 2 à 4 connexions TLS, écriture
 flash avec l'autre cœur en pause, `malloc` partagé).
 
+## Ajouts 2026-10-01 (validation sans carte)
+| ID | P | User story | État |
+|----|---|------------|------|
+| US-T19 | P1 | En tant que développeur, je veux un **modem simulé sur PC** (`pc/pcmodem` : cœur du firmware inchangé, sockets du PC, TLS mbedTLS avec la configuration et le magasin de racines du firmware, port série virtuel, second port TNFS), afin de valider sans carte et d'offrir un modem de référence aux émulateurs. | **Terminé 2026-10-01** — `validate.py --pc` : 78/78 (`validation/RAPPORT-validation-pc-2026-10-01.md`) ; a révélé deux défauts corrigés (TLS : enregistrements de 16 Ko ; HTTP : en-têtes > 2 Ko) |
+| US-W10 | P1 | En tant qu'utilisateur HTTPS, je veux que le modem accepte les **enregistrements TLS de 16 Ko** (taille maximale), afin de lire des réponses de serveurs comme github.com. Constat (modem simulé, 2026-10-01) : `MBEDTLS_SSL_IN_CONTENT_LEN` = 8192 → `-0x7100` à la lecture. | Corrigé (16384) — tas TLS +8 Ko **à mesurer sur carte** |
+
 ### Sprint proposé (ordre de priorité, 2026-10-01)
 1. **US-W6** — configuration Wi-Fi depuis un téléphone (premier obstacle de tout nouvel utilisateur).
 2. **US-T12** — hôtes autorisés (court ; prérequis de sécurité d'US-T16 et de `N:`).

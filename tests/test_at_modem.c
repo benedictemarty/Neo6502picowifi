@@ -939,6 +939,26 @@ static void test_http(void)
     CHECK(M.conns <= 6);
     clear_out();
 
+    /* en-têtes énormes (github.com : CSP de plusieurs Ko) : sautés, réponse lue */
+    http_setup();
+    static char hugeh[12000];
+    char *h = hugeh + sprintf(hugeh, "HTTP/1.1 200 OK\r\nContent-Security-Policy: ");
+    memset(h, 'c', 8000); h += 8000;
+    h += sprintf(h, "\r\nX-Other: 1\r\nContent-Type: text/html\r\nContent-Length: 4\r\n");
+    for (int i = 0; i < 60; i++) h += sprintf(h, "X-Filler-%02d: %040d\r\n", i, i);   /* > 2 Ko d'en-têtes courts */
+    sprintf(h, "\r\nbody");
+    M.http_resp[0] = hugeh;
+    send("AT+HTTPGET=\"http://x.fr/\"\r\n"); CHECK_OUT("+HTTPGET:200,4,\"text/html\"");
+    CHECK(read_all(body, sizeof body, &reads) == 4 && !memcmp(body, "body", 4));
+    clear_out();
+    /* en-tête utile démesuré : refus net */
+    http_setup();
+    static char longloc[1200];
+    h = longloc + sprintf(longloc, "HTTP/1.1 302 Found\r\nLocation: http://x.fr/");
+    memset(h, 'a', 700); strcpy(h + 700, "\r\n\r\n");
+    M.http_resp[0] = longloc;
+    send("AT+HTTPGET=\"http://x.fr/\"\r\n"); CHECK_OUT("HTTP header too large"); CHECK(!M.tcp_up); clear_out();
+
     /* 404, 204 */
     http_setup();
     M.http_resp[0] = "HTTP/1.1 404 Not Found\r\nContent-Length: 3\r\n\r\nnon";

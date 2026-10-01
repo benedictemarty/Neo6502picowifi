@@ -34,7 +34,11 @@
 #define MBEDTLS_SSL_PROTO_TLS1_2
 #define MBEDTLS_SSL_SERVER_NAME_INDICATION
 #define MBEDTLS_SSL_SESSION_TICKETS
-#define MBEDTLS_SSL_IN_CONTENT_LEN     8192
+/* 16 Ko : taille maximale d'un enregistrement TLS (RFC 8446/5246). Avec 8 Ko,
+   un serveur qui envoie des enregistrements pleins (github.com) faisait échouer
+   la lecture (« requesting more data than fits », -0x7100) : trouvé par le
+   modem simulé sur PC le 2026-10-01. Coût : +8 Ko de tas par connexion TLS. */
+#define MBEDTLS_SSL_IN_CONTENT_LEN     16384
 #define MBEDTLS_SSL_OUT_CONTENT_LEN    2048
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED

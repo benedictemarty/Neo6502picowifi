@@ -12,6 +12,10 @@ tests/roots_fixture_gen.c
 tests/mbedtls-host/
 __pycache__/
 dist/
+pc/pcmodem
+pc/mbedtls-pc/
+pc/roots_gen.c
+pcmodem.cfg
 tests/test_reset_cause
 # Tenus en local uniquement, jamais suivis par git (decision bmarty 2026-09-27)
 CHANGELOG.md

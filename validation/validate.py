@@ -14,6 +14,9 @@ Usage : python3 validate.py [/dev/ttyACM0] [--quick] [--tnfs-usb] [--tnfsd hôte
   --tnfs-usb : active le second port USB (AT$TNFSUSB=1, redémarrage), le teste,
                puis remet le réglage d'origine (US-T17)
   --tnfsd    : MOUNT TNFS réel contre ce serveur, par l'UDP AT (US-T14)
+  --pc       : cible = modem simulé sur PC (pc/pcmodem) : saute ce qui n'existe que
+               sur la carte (AT+TLSTEST, détails ATI du TLS, reprise de session,
+               point d'accès) ; --tnfs-pty <lien> remplace --tnfs-usb
 """
 import os, socket, struct, sys, threading, time
 import serial
@@ -22,6 +25,9 @@ PORT = next((a for a in sys.argv[1:] if a.startswith('/dev/')), '/dev/ttyACM0')
 QUICK = '--quick' in sys.argv
 TNFS_USB = '--tnfs-usb' in sys.argv
 TNFSD = sys.argv[sys.argv.index('--tnfsd') + 1] if '--tnfsd' in sys.argv else None
+PC = '--pc' in sys.argv
+TNFS_PTY = sys.argv[sys.argv.index('--tnfs-pty') + 1] if '--tnfs-pty' in sys.argv else None
+PORT = next((a for a in sys.argv[1:] if a.startswith('/') and a != TNFS_PTY), PORT)
 results = []          # (étape, ok, détail)
 
 def hd(m): print(f'\n== {m} ==')
@@ -105,7 +111,7 @@ o, _ = cmd('AT+CIPSSLCCONF?'); rec('AT+CIPSSLCCONF? → 2 (CA vérifiée)', '+CI
 o, dt = cmd('AT+CWLAP', 20); n = o.count('+CWLAP:(')
 rec('AT+CWLAP liste des réseaux', n >= 1 and 'OK' in o, f'{n} réseaux en {dt:.1f}s')
 o, dt = cmd('AT+PING="mimuma.pl"', 8); rec('AT+PING', '+' in o and 'OK' in o, o.strip().splitlines()[0] if o.strip() else '')
-o, dt = cmd('AT+TLSTEST', 60); rec('AT+TLSTEST autotests mbedTLS', 'gcm=0' in o and 'aes=0' in o and 'ecp=0' in o, o.strip().splitlines()[0] if o.strip() else '')
+if not PC: o, dt = cmd('AT+TLSTEST', 60); rec('AT+TLSTEST autotests mbedTLS', 'gcm=0' in o and 'aes=0' in o and 'ecp=0' in o, o.strip().splitlines()[0] if o.strip() else '')
 
 # ------------------------------------------------------------ 1. Prophet en clair
 hd('2. Séquence Prophet en clair (mimuma.pl:80)')
@@ -120,14 +126,17 @@ o, _ = cmd('AT+CIPSTATUS'); rec('STATUS:4 (TCP fermé)', 'STATUS:4' in o)
 # ------------------------------------------------------------ 2. TLS
 hd('3. TLS')
 o, dt = cmd('AT+CIPSTART="SSL","mimuma.pl",443', 60); rec('SSL mimuma.pl (Let\'s Encrypt) → CONNECT', 'CONNECT' in o, f'{dt:.1f}s')
-o, _ = cmd('ATI'); hs = o.split('last handshake: ')[1].split(',')[0] if 'last handshake: ' in o else '?'
-rec('ATI : handshake complet mesuré', 'verify: d0=0x0' in o, hs)
-heap = o.split('heap: ')[1].split(', time')[0] if 'heap: ' in o else '?'
-rec('ATI : racine ISRG Root X1 trouvée dans le magasin en flash (US-T13)', 'last root: ISRG Root X1,' in o, heap)
+o, _ = cmd('ATI')
+if not PC:
+    hs = o.split('last handshake: ')[1].split(',')[0] if 'last handshake: ' in o else '?'
+    rec('ATI : handshake complet mesuré', 'verify: d0=0x0' in o, hs)
+    heap = o.split('heap: ')[1].split(', time')[0] if 'heap: ' in o else '?'
+    rec('ATI : racine ISRG Root X1 trouvée dans le magasin en flash (US-T13)', 'last root: ISRG Root X1,' in o, heap)
 o, _ = cmd(f'AT+CIPSEND={len(req)}', 2, (b'> ',))
 o, dt = cmd(req + b'\r\n', 15, (b'CLOSED',)); rec('HTTPS : réponse déchiffrée en +IPD', 'HTTP/1.1 200' in o and 'CLOSED' in o)
 o, dt = cmd('AT+CIPSTART="SSL","mimuma.pl",443', 60); rec('SSL mimuma.pl 2e fois (reprise de session)', 'CONNECT' in o, f'{dt:.1f}s')
-o, _ = cmd('ATI'); rec('ATI : resumed', 'resumed' in o, o.split('last handshake: ')[1].split(')')[0] + ')' if 'last handshake: ' in o else '')
+o, _ = cmd('ATI')
+if not PC: rec('ATI : resumed', 'resumed' in o, o.split('last handshake: ')[1].split(')')[0] + ')' if 'last handshake: ' in o else '')
 cmd('AT+CIPCLOSE')
 if not QUICK:
     o, dt = cmd('AT+CIPSTART="SSL","badssl.com",443', 60); rec('SSL badssl.com (ISRG Root X1) → CONNECT', 'CONNECT' in o, f'{dt:.1f}s'); cmd('AT+CIPCLOSE')
@@ -136,7 +145,7 @@ if not QUICK:
                        ('github.com', 'Sectigo Public Server Authentication Root E46')):
         o, dt = cmd(f'AT+CIPSTART="SSL","{host}",443', 60); okc = 'CONNECT' in o; cmd('AT+CIPCLOSE')
         o, _ = cmd('ATI'); heap = o.split('heap: ')[1].split(', time')[0] if 'heap: ' in o else '?'
-        rec(f'SSL {host} ({root}) → CONNECT', okc and f'last root: {root},' in o, f'{dt:.1f}s, heap: {heap}')
+        rec(f'SSL {host} ({root}) → CONNECT', okc and (PC or f'last root: {root},' in o), f'{dt:.1f}s, heap: {heap}')
     o, dt = cmd('AT+CIPSTART="SSL","untrusted-root.badssl.com",443', 60); rec('REFUS racine inconnue (untrusted-root.badssl.com)', 'TLS handshake failed' in o and 'CONNECT' not in o, f'{dt:.1f}s')
     o, dt = cmd('AT+CIPSTART="SSL","wrong.host.badssl.com",443', 60); rec('REFUS nom d\'hôte faux (wrong.host.badssl.com)', 'TLS handshake failed' in o and 'CONNECT' not in o, f'{dt:.1f}s')
     o, dt = cmd('AT+CIPSTART="SSL","expired.badssl.com",443', 60); rec('REFUS certificat expiré (expired.badssl.com, racine pourtant présente)', 'TLS handshake failed' in o and 'CONNECT' not in o, f'{dt:.1f}s')
@@ -153,7 +162,7 @@ for i in range(3):
     r = b'GET / HTTP/1.1 \r\nHost: mimuma.pl\r\nRange: bytes=%d-%d\r\nResponseFormat: cli\r\n\r\n' % (i * 8192, i * 8192 + 8191)
     cmd(f'AT+CIPSEND={len(r)}', 2, (b'> ',)); o2, dt2 = cmd(r + b'\r\n', 20, (b'CLOSED',))
     times.append(dt); rec(f'bloc {i + 1} : CONNECT + réponse + CLOSED', okc and '+IPD,' in o2 and 'CLOSED' in o2, f'connexion {dt:.1f}s, réponse {dt2:.1f}s')
-rec('reprise : connexions 2 et 3 plus rapides que la 1re', len(times) == 3 and times[1] < times[0] and times[2] < times[0], ' / '.join(f'{t:.1f}s' for t in times))
+if not PC: rec('reprise : connexions 2 et 3 plus rapides que la 1re', len(times) == 3 and times[1] < times[0] and times[2] < times[0], ' / '.join(f'{t:.1f}s' for t in times))
 o, _ = cmd('AT+TLSPORT=0'); rec('AT+TLSPORT=0 (effacement)', 'OK' in o)
 
 # ------------------------------------------------------------ 4. Hayes
@@ -303,12 +312,14 @@ rec('HTTPGET https://mimuma.pl/ (TLS) → 200, corps complet', code == 200 and o
     f'{code}, annoncé {size}, lu {len(body)} o, {dt:.1f}s')
 code, size, o, dt = httpget('https://mimuma.pl/', ',0,99')
 body, reads, okr = http_read_all() if code else (b'', 0, False)
-rec('Range 0-99 → 206 et 100 octets', code == 206 and okr and len(body) == 100, f'{code}, {len(body)} o')
+rec('Range 0-99 → 206, au plus 100 octets, taille annoncée lue', code == 206 and okr and 0 < len(body) <= 100 and len(body) == size,
+    f'{code}, annoncé {size}, lu {len(body)} o')
 if not QUICK:
+    # github.com : > 4 Ko d'en-têtes, corps chunked de plus de 500 Ko en enregistrements TLS de 16 Ko
     code, size, o, dt = httpget('http://github.com/')
-    body, reads, okr = http_read_all() if code else (b'', 0, False)
-    rec('redirection http://github.com → https, 200, corps lu (chunked ou non)', code == 200 and okr and len(body) > 1000,
-        f'{code}, annoncé {size}, lu {len(body)} o, {dt:.1f}s')
+    body, reads, okr = http_read_all(2048, 65536) if code else (b'', 0, False)
+    rec('redirection http://github.com → https, 200, 64 Ko de corps lus (en-têtes > 4 Ko, TLS 16 Ko)',
+        code == 200 and len(body) >= 65536 and b'<html' in body.lower(), f'{code}, annoncé {size}, lu {len(body)} o, {dt:.1f}s')
 o, _ = cmd('AT+HTTPCLOSE'); rec('HTTPCLOSE → OK', 'OK' in o)
 o, _ = cmd('AT+HTTPGET="ftp://x"'); rec('URL invalide → bad URL', 'bad URL' in o and 'ERROR' in o)
 o, _ = cmd('AT+CIPSTART="TCP","mimuma.pl",80', 15)
@@ -323,38 +334,42 @@ o, _ = cmd('AT+NLOG?'); rec('AT+NLOG? journalise les connexions de la session', 
                             f"{o.count('+NLOG:')} entrées")
 
 # ------------------------------------------------------------ 9. point d'accès (US-W6), partie automatisable
-hd('9. Point d\'accès de configuration (US-W6) — sans téléphone')
-o, _ = cmd('AT+APSETUP?'); rec('AT+APSETUP? → 0 (Wi-Fi mémorisé et joint)', '+APSETUP:0' in o)
-o, dt = cmd('AT+APSETUP=1', 10); rec('AT+APSETUP=1 → OK', 'OK' in o, f'{dt:.1f}s')
-o, _ = cmd('AT+APSETUP?'); ap = o.split('"')[1] if '+APSETUP:1,"' in o else ''
-rec('AT+APSETUP? → 1, SSID Neo6502-modem-XXXX', ap.startswith('Neo6502-modem-'), ap)
-o, _ = cmd('ATI'); rec('ATI : ligne setup AP', 'setup AP: "Neo6502-modem-' in o)
-o, _ = cmd('AT+CIPSTATUS'); rec('station toujours associée (STATUS:2..4)', any(f'STATUS:{c}' in o for c in '234'))
-o, dt = cmd('AT+CIPSTART="TCP","mimuma.pl",80', 15)
-rec('connexion sortante pendant que l\'AP est ouvert (route par défaut = station)', 'CONNECT' in o, f'{dt:.1f}s')
-cmd('AT+CIPCLOSE')
-time.sleep(5)
-o, dt = cmd('AT+CWLAP', 20); rec('AT+CWLAP pendant que l\'AP est ouvert', 'OK' in o, f"{o.count('+CWLAP:(')} réseaux")
-if ap:
-    print(f'  (manuel, si un téléphone est là : rejoindre « {ap} », mot de passe AT+APSETUPPWD?, ouvrir http://192.168.4.1/)')
-o, _ = cmd('AT+APSETUP=0', 5); rec('AT+APSETUP=0 → OK', 'OK' in o)
-o, _ = cmd('AT+APSETUP?'); rec('AT+APSETUP? → 0', '+APSETUP:0' in o)
+if not PC:
+  hd('9. Point d\'accès de configuration (US-W6) — sans téléphone')
+  o, _ = cmd('AT+APSETUP?'); rec('AT+APSETUP? → 0 (Wi-Fi mémorisé et joint)', '+APSETUP:0' in o)
+  o, dt = cmd('AT+APSETUP=1', 10); rec('AT+APSETUP=1 → OK', 'OK' in o, f'{dt:.1f}s')
+  o, _ = cmd('AT+APSETUP?'); ap = o.split('"')[1] if '+APSETUP:1,"' in o else ''
+  rec('AT+APSETUP? → 1, SSID Neo6502-modem-XXXX', ap.startswith('Neo6502-modem-'), ap)
+  o, _ = cmd('ATI'); rec('ATI : ligne setup AP', 'setup AP: "Neo6502-modem-' in o)
+  o, _ = cmd('AT+CIPSTATUS'); rec('station toujours associée (STATUS:2..4)', any(f'STATUS:{c}' in o for c in '234'))
+  o, dt = cmd('AT+CIPSTART="TCP","mimuma.pl",80', 15)
+  rec('connexion sortante pendant que l\'AP est ouvert (route par défaut = station)', 'CONNECT' in o, f'{dt:.1f}s')
+  cmd('AT+CIPCLOSE')
+  time.sleep(5)
+  o, dt = cmd('AT+CWLAP', 20); rec('AT+CWLAP pendant que l\'AP est ouvert', 'OK' in o, f"{o.count('+CWLAP:(')} réseaux")
+  if ap:
+      print(f'  (manuel, si un téléphone est là : rejoindre « {ap} », mot de passe AT+APSETUPPWD?, ouvrir http://192.168.4.1/)')
+  o, _ = cmd('AT+APSETUP=0', 5); rec('AT+APSETUP=0 → OK', 'OK' in o)
+  o, _ = cmd('AT+APSETUP?'); rec('AT+APSETUP? → 0', '+APSETUP:0' in o)
 
 # ------------------------------------------------------------ 10. second port USB (US-T17), en option
-if TNFS_USB:
-    hd('10. Second port USB TNFS (US-T17)')
-    o, _ = cmd('AT$TNFSUSB?'); was = '1' if '$TNFSUSB:1' in o else '0'
-    rec('AT$TNFSUSB? lisible', '$TNFSUSB:' in o, f'valeur d\'origine {was}')
-    if was == '0':
-        o, _ = cmd('AT$TNFSUSB=1'); rec('AT$TNFSUSB=1 → OK', 'OK' in o)
-        ok_rst, st, dt = reboot(); rec('redémarrage, Wi-Fi rejoint', ok_rst and st in '234', f'{dt:.0f}s')
-    tnfs_dev = PORT[:-1] + str(int(PORT[-1]) + 1)
+if TNFS_USB or TNFS_PTY:
+    hd('10. Second port USB TNFS (US-T17)' + (' — port virtuel du modem PC' if TNFS_PTY else ''))
+    was = '1'
+    if not TNFS_PTY:
+        o, _ = cmd('AT$TNFSUSB?'); was = '1' if '$TNFSUSB:1' in o else '0'
+        rec('AT$TNFSUSB? lisible', '$TNFSUSB:' in o, f'valeur d\'origine {was}')
+        if was == '0':
+            o, _ = cmd('AT$TNFSUSB=1'); rec('AT$TNFSUSB=1 → OK', 'OK' in o)
+            ok_rst, st, dt = reboot(); rec('redémarrage, Wi-Fi rejoint', ok_rst and st in '234', f'{dt:.0f}s')
+    tnfs_dev = TNFS_PTY or PORT[:-1] + str(int(PORT[-1]) + 1)
     t0 = time.time()
     while not os.path.exists(tnfs_dev) and time.time() - t0 < 10: time.sleep(0.5)
     rec(f'{tnfs_dev} présent (interface « TNFS »)', os.path.exists(tnfs_dev))
     echo = UdpEcho()
     o, _ = cmd(f'AT$TNFS="{PC_IP}",{echo.port}'); rec('AT$TNFS=PC → OK', 'OK' in o)
-    o, _ = cmd('ATI'); rec('ATI : ligne TNFS', f'TNFS (USB port 2): {PC_IP}:{echo.port}' in o)
+    if not TNFS_PTY:
+        o, _ = cmd('ATI'); rec('ATI : ligne TNFS', f'TNFS (USB port 2): {PC_IP}:{echo.port}' in o)
     o, _ = cmd('AT+CIPSTART="TCP","mimuma.pl",80', 15); rec('lien AT TCP ouvert en parallèle', 'CONNECT' in o)
     try:
         t = serial.Serial(tnfs_dev, 115200, timeout=0.3); time.sleep(0.5); t.reset_input_buffer()
@@ -378,7 +393,7 @@ if TNFS_USB:
     rec('lien AT toujours vivant pendant TNFS (CIPCLOSE → CLOSED)', b'CLOSED' in raw)
     echo.stop()
     cmd('AT$TNFS=0')
-    if was == '0':
+    if was == '0' and not TNFS_PTY:
         cmd('AT$TNFSUSB=0'); ok_rst, st, dt = reboot()
         rec('réglage d\'origine remis (AT$TNFSUSB=0), un seul port USB', ok_rst and not os.path.exists(tnfs_dev))
 

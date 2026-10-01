@@ -281,6 +281,27 @@ and `AT+CWJAP_DEF="ssid","pass"`.
 Anything not measured on a real board is marked "non validé" (not validated)
 in the French documents.
 
+## Modem simulated on the PC
+
+`pc/pcmodem` runs the firmware core (`src/at_modem.c`, `http_parse.c`, `tnfs_link.c`,
+unchanged) on the PC network, exposed as a virtual serial port: validation without the
+board, and a reference modem for emulators (reload, Phosphoneo…).
+
+```
+make -C pc PICO_SDK_PATH=~/pico-sdk-internal    # TLS: SDK mbedTLS, firmware config
+pc/pcmodem -l /tmp/neomodem [-T /tmp/neotnfs] [-c pcmodem.cfg]
+python3 validation/validate.py /tmp/neomodem --pc [--tnfs-pty /tmp/neotnfs]
+```
+
+- `-l`: link to the AT port; `-T`: second "TNFS" port (length + datagram frames);
+  `-c`: persistent configuration (file).
+- TLS with the same cipher suites, root store and `roots_ca_cb` callback as the firmware;
+  without `PICO_SDK_PATH`, built without TLS (reported).
+- Differences: simulated Wi-Fi (the PC network; `AT+CWJAP` accepts any SSID), no access
+  point, no TLS session resumption, certificate dates checked with the PC clock (no SNTP
+  required), `AT+PING` through the `ping` command.
+- Report: `validation/RAPPORT-validation-pc-2026-10-01.md` (78/78).
+
 ## Layout
 
 ```
@@ -301,6 +322,7 @@ src/roots_ca_cb.[ch]  mbedTLS callback: roots decoded on demand
 src/main.c            USB CDC + UART0 transports, main loop, LED
 src/usb_descriptors.c, tusb_config.h, lwipopts.h
 tests/                PC unit tests
+pc/                   modem simulated on the PC (pcmodem.c, PC mbedTLS config)
 validation/           on-board validation protocol, script and reports
 docs/BACKLOG.md       agile backlog (French); CHANGELOG.md — versions match `AT+GMR` and tags `vX.Y.Z`
 VERSION               version (semver); cmake/build_id.cmake: build id; tools/release.sh
