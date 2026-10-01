@@ -10,13 +10,18 @@ Pré-requis : Pico W flashé (make flash ou AT+BOOTSEL), Wi-Fi provisionné
 même réseau pour l'appel entrant (RING/ATA).
 
 Protocole série : commandes terminées par CRLF (comme netsetup.pas), 115200.
-Usage : python3 validate.py [/dev/ttyACM0] [--quick]
+Usage : python3 validate.py [/dev/ttyACM0] [--quick] [--tnfs-usb] [--tnfsd hôte[:port]]
+  --tnfs-usb : active le second port USB (AT$TNFSUSB=1, redémarrage), le teste,
+               puis remet le réglage d'origine (US-T17)
+  --tnfsd    : MOUNT TNFS réel contre ce serveur, par l'UDP AT (US-T14)
 """
-import socket, sys, threading, time
+import os, socket, struct, sys, threading, time
 import serial
 
 PORT = next((a for a in sys.argv[1:] if a.startswith('/dev/')), '/dev/ttyACM0')
 QUICK = '--quick' in sys.argv
+TNFS_USB = '--tnfs-usb' in sys.argv
+TNFSD = sys.argv[sys.argv.index('--tnfsd') + 1] if '--tnfsd' in sys.argv else None
 results = []          # (étape, ok, détail)
 
 def hd(m): print(f'\n== {m} ==')
@@ -44,30 +49,38 @@ def listen(t):
 def escape():
     time.sleep(1.2); s.write(b'+++'); time.sleep(1.3); return listen(0.5)
 
+def reboot():
+    """AT+RST, réouverture du port, attente du Wi-Fi ; renvoie (ok_rst, STATUS, durée)."""
+    global s
+    cmd('ATE0')
+    try: o, _ = cmd('AT+RST', 2)
+    except serial.SerialException: o = 'OK'      # le port disparaît pendant le redémarrage
+    try: s.close()
+    except serial.SerialException: pass
+    time.sleep(3)
+    t0 = time.time()
+    while time.time() - t0 < 30:
+        try:
+            s = serial.Serial(PORT, 115200, timeout=0.3); break
+        except serial.SerialException: time.sleep(1)
+    else:
+        print('port série absent après AT+RST'); sys.exit(2)
+    time.sleep(1); s.reset_input_buffer()
+    cmd('ATE0')
+    st = '?'
+    while time.time() - t0 < 60:
+        o2, _ = cmd('AT+CIPSTATUS', 2)
+        if 'STATUS:' in o2: st = o2.split('STATUS:')[1][0]
+        if st in '234': break
+        time.sleep(2)
+    return 'OK' in o, st, time.time() - t0
+
 # ------------------------------------------------------------ 0. base
 hd('0. Redémarrage (état connu : pas de session TLS en mémoire) et reconnexion Wi-Fi')
-o, _ = cmd('ATE0')
-try: o, _ = cmd('AT+RST', 2)
-except serial.SerialException: o = 'OK'          # le port disparaît pendant le redémarrage
-rec('AT+RST → OK', 'OK' in o)
-try: s.close()
-except serial.SerialException: pass
-time.sleep(3)
+ok_rst, st, dt = reboot()
+rec('AT+RST → OK', ok_rst)
+rec('reconnexion Wi-Fi automatique au boot', st in '234', f'STATUS:{st} après {dt:.0f}s')
 t0 = time.time()
-while time.time() - t0 < 30:
-    try:
-        s = serial.Serial(PORT, 115200, timeout=0.3); break
-    except serial.SerialException: time.sleep(1)
-else:
-    print('port série absent après AT+RST'); sys.exit(2)
-time.sleep(1); s.reset_input_buffer()
-st = '?'
-while time.time() - t0 < 60:
-    o, _ = cmd('AT+CIPSTATUS', 2)
-    if 'STATUS:' in o: st = o.split('STATUS:')[1][0]
-    if st in '234': break
-    time.sleep(2)
-rec('reconnexion Wi-Fi automatique au boot', st in '234', f'STATUS:{st} après {time.time() - t0:.0f}s')
 t0 = time.time()
 while time.time() - t0 < 30:
     o, _ = cmd('AT+CIPSNTPTIME?', 2)
@@ -173,6 +186,201 @@ s.write(b'salut du Neo6502\r\n'); time.sleep(3); rec('le PC reçoit la ligne ent
 r = listen(3); rec('NO CARRIER à la fermeture par le PC', b'NO CARRIER' in r)
 cmd('AT+CIPSERVER=0')
 o, _ = cmd('ATS12?'); rec('ATS12? → 050', '050' in o)
+
+# ------------------------------------------------------------ 6. UDP (US-T14)
+o, _ = cmd('AT+CIFSR'); ip = o.split('"')[1] if '"' in o else ''
+def pc_ip_towards(dest):
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try: u.connect((dest, 9)); return u.getsockname()[0]
+    finally: u.close()
+PC_IP = pc_ip_towards(ip) if ip else ''
+
+class UdpEcho:
+    """Serveur UDP du PC : renvoie chaque datagramme ; « burst:n » → n datagrammes."""
+    def __init__(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(('0.0.0.0', 0)); self.port = self.sock.getsockname()[1]
+        self.sock.settimeout(0.5); self.run = True; self.seen = []
+        threading.Thread(target=self.loop, daemon=True).start()
+    def loop(self):
+        while self.run:
+            try: d, a = self.sock.recvfrom(4096)
+            except socket.timeout: continue
+            self.seen.append(len(d))
+            if d.startswith(b'burst:'):
+                for i in range(int(d[6:])): self.sock.sendto(b'B%02d' % i + b'x' * (100 + i), a)
+            else:
+                self.sock.sendto(d, a)
+    def stop(self): self.run = False
+
+def ipd_list(raw):
+    """Découpe une sortie en charges +IPD (longueur annoncée respectée)."""
+    out, i = [], 0
+    while True:
+        j = raw.find(b'+IPD,', i)
+        if j < 0: return out
+        k = raw.find(b':', j)
+        if k < 0 or not raw[j + 5:k].isdigit(): return out      # en-tête pas encore complet
+        n = int(raw[j + 5:k]); out.append(raw[k + 1:k + 1 + n]); i = k + 1 + n
+
+def cmd_raw(data, wait, stop):
+    s.write(data); t0 = time.time(); out = b''
+    while time.time() - t0 < wait:
+        out += s.read(8192)
+        if stop(out): time.sleep(0.2); out += s.read(8192); break
+    return out
+
+hd('6. UDP au format ESP8266 (US-T14) — serveur d\'écho UDP sur le PC')
+echo = UdpEcho()
+o, dt = cmd(f'AT+CIPSTART="UDP","{PC_IP}",{echo.port}', 15)
+rec('CIPSTART "UDP" → CONNECT', 'CONNECT' in o and 'OK' in o, f'PC {PC_IP}:{echo.port}')
+o, _ = cmd('AT+CIPSTATUS'); rec('CIPSTATUS : lien "UDP"', '"UDP"' in o)
+for size in (1, 532, 1472):
+    payload = bytes((i * 7 + size) & 0xff for i in range(size))
+    o, _ = cmd(f'AT+CIPSEND={size}', 2, (b'> ',))
+    raw = cmd_raw(payload, 5, lambda b, n=size: b'+IPD,%d:' % n in b and len(ipd_list(b)) >= 1 and len(ipd_list(b)[0]) >= n)
+    got = ipd_list(raw)
+    rec(f'datagramme de {size} o : SEND OK puis un +IPD identique', b'SEND OK' in raw and len(got) == 1 and got[0] == payload,
+        f'{len(got)} +IPD')
+o, _ = cmd('AT+CIPSEND=8', 2, (b'> ',))
+raw = cmd_raw(b'burst:12', 6, lambda b: len(ipd_list(b)) >= 12)
+got = ipd_list(raw)
+rec('12 datagrammes en rafale → 12 +IPD, ni regroupés ni coupés, dans l\'ordre',
+    len(got) == 12 and all(g == b'B%02d' % i + b'x' * (100 + i) for i, g in enumerate(got)), f'{len(got)} +IPD')
+o, _ = cmd('AT+CIPSEND=1473'); rec('CIPSEND=1473 en UDP → ERROR', 'ERROR' in o)
+o, _ = cmd('ATO', 2, (b'CONNECT', b'NO CARRIER')); rec('ATO sur lien UDP → NO CARRIER', 'NO CARRIER' in o)
+o, _ = cmd('AT+CIPCLOSE'); rec('CIPCLOSE → CLOSED', 'CLOSED' in o)
+echo.stop()
+if TNFSD:
+    host, _, tport = TNFSD.partition(':'); tport = int(tport or 16384)
+    o, _ = cmd(f'AT+CIPSTART="UDP","{host}",{tport}', 15)
+    mount = struct.pack('<HBB', 0, 0, 0) + b'\x02\x01' + b'/\x00' + b'\x00' + b'\x00'   # MOUNT "/" anonyme
+    cmd(f'AT+CIPSEND={len(mount)}', 2, (b'> ',))
+    raw = cmd_raw(mount, 6, lambda b: len(ipd_list(b)) >= 1)
+    got = ipd_list(raw)
+    rec(f'TNFS MOUNT sur {host}:{tport} → réponse, statut 0', len(got) == 1 and len(got[0]) >= 5 and got[0][3] == 0 and got[0][4] == 0,
+        got[0][:8].hex() if got else 'aucune réponse')
+    cmd('AT+CIPCLOSE')
+
+# ------------------------------------------------------------ 7. HTTP (US-T11)
+def read_done(b):
+    """Réponse AT+HTTPREAD complète : en-tête, k octets annoncés, puis OK (ou ERROR)."""
+    j = b.find(b'+HTTPREAD:')
+    if j < 0: return b'ERROR' in b
+    k = b.find(b':', j + 10)
+    if k < 0: return False
+    cnt = b[j + 10:k].split(b',')[0]
+    return cnt.isdigit() and len(b) >= k + 1 + int(cnt) + 6
+
+def http_read_all(n=1024, limit=400000):
+    """AT+HTTPREAD jusqu'à suite = 0 ; renvoie (corps, nombre de lectures, ok)."""
+    body, reads = b'', 0
+    while len(body) < limit:
+        raw = cmd_raw(b'AT+HTTPREAD=%d\r\n' % n, 15, read_done)
+        j = raw.find(b'+HTTPREAD:')
+        if j < 0: return body, reads, False
+        k = raw.find(b':', j + 10)
+        cnt, more = raw[j + 10:k].split(b',')
+        cnt = int(cnt); body += raw[k + 1:k + 1 + cnt]; reads += 1
+        if raw[k + 1 + cnt:k + 1 + cnt + 6] != b'\r\nOK\r\n': return body, reads, False
+        if more == b'0': return body, reads, True
+    return body, reads, False
+
+def httpget(url, extra=''):
+    o, dt = cmd(f'AT+HTTPGET="{url}"{extra}', 60)
+    if '+HTTPGET:' not in o: return None, None, o, dt
+    code, size = o.split('+HTTPGET:')[1].split(',')[:2]
+    return int(code), int(size), o, dt
+
+hd('7. Flux HTTP(S) (US-T11)')
+code, size, o, dt = httpget('http://mimuma.pl/')
+body, reads, okr = http_read_all() if code else (b'', 0, False)
+rec('HTTPGET http://mimuma.pl/ → 200, corps complet', code == 200 and okr and (size < 0 or len(body) == size),
+    f'{code}, annoncé {size}, lu {len(body)} o en {reads} lectures, {dt:.1f}s')
+code, size, o, dt = httpget('https://mimuma.pl/')
+body, reads, okr = http_read_all() if code else (b'', 0, False)
+rec('HTTPGET https://mimuma.pl/ (TLS) → 200, corps complet', code == 200 and okr and (size < 0 or len(body) == size),
+    f'{code}, annoncé {size}, lu {len(body)} o, {dt:.1f}s')
+code, size, o, dt = httpget('https://mimuma.pl/', ',0,99')
+body, reads, okr = http_read_all() if code else (b'', 0, False)
+rec('Range 0-99 → 206 et 100 octets', code == 206 and okr and len(body) == 100, f'{code}, {len(body)} o')
+if not QUICK:
+    code, size, o, dt = httpget('http://github.com/')
+    body, reads, okr = http_read_all() if code else (b'', 0, False)
+    rec('redirection http://github.com → https, 200, corps lu (chunked ou non)', code == 200 and okr and len(body) > 1000,
+        f'{code}, annoncé {size}, lu {len(body)} o, {dt:.1f}s')
+o, _ = cmd('AT+HTTPCLOSE'); rec('HTTPCLOSE → OK', 'OK' in o)
+o, _ = cmd('AT+HTTPGET="ftp://x"'); rec('URL invalide → bad URL', 'bad URL' in o and 'ERROR' in o)
+o, _ = cmd('AT+CIPSTART="TCP","mimuma.pl",80', 15)
+raw = cmd_raw(b'AT+CIPCLOSE\r\n', 3, lambda b: b'OK' in b)
+rec('après HTTP, CIPSTART/CIPCLOSE normaux', 'CONNECT' in o and b'CLOSED' in raw)
+
+# ------------------------------------------------------------ 8. filtrage (US-T12), partie automatisable
+hd('8. Hôtes autorisés (US-T12) — lecture seule en AT, journal')
+o, _ = cmd('AT+NHOSTS?'); rec('AT+NHOSTS? → filtrage inactif par défaut', '+NHOSTS:0' in o, o.strip().splitlines()[0] if o.strip() else '')
+o, _ = cmd('AT+NHOSTS=1,"x"'); rec('AT+NHOSTS=… refusé (lecture seule)', 'read-only' in o and 'ERROR' in o)
+o, _ = cmd('AT+NLOG?'); rec('AT+NLOG? journalise les connexions de la session', '+NLOG:' in o and '"mimuma.pl"' in o and 'allowed' in o,
+                            f"{o.count('+NLOG:')} entrées")
+
+# ------------------------------------------------------------ 9. point d'accès (US-W6), partie automatisable
+hd('9. Point d\'accès de configuration (US-W6) — sans téléphone')
+o, _ = cmd('AT+APSETUP?'); rec('AT+APSETUP? → 0 (Wi-Fi mémorisé et joint)', '+APSETUP:0' in o)
+o, dt = cmd('AT+APSETUP=1', 10); rec('AT+APSETUP=1 → OK', 'OK' in o, f'{dt:.1f}s')
+o, _ = cmd('AT+APSETUP?'); ap = o.split('"')[1] if '+APSETUP:1,"' in o else ''
+rec('AT+APSETUP? → 1, SSID Neo6502-modem-XXXX', ap.startswith('Neo6502-modem-'), ap)
+o, _ = cmd('ATI'); rec('ATI : ligne setup AP', 'setup AP: "Neo6502-modem-' in o)
+o, _ = cmd('AT+CIPSTATUS'); rec('station toujours associée (STATUS:2..4)', any(f'STATUS:{c}' in o for c in '234'))
+o, dt = cmd('AT+CIPSTART="TCP","mimuma.pl",80', 15)
+rec('connexion sortante pendant que l\'AP est ouvert (route par défaut = station)', 'CONNECT' in o, f'{dt:.1f}s')
+cmd('AT+CIPCLOSE')
+time.sleep(5)
+o, dt = cmd('AT+CWLAP', 20); rec('AT+CWLAP pendant que l\'AP est ouvert', 'OK' in o, f"{o.count('+CWLAP:(')} réseaux")
+if ap:
+    print(f'  (manuel, si un téléphone est là : rejoindre « {ap} », mot de passe AT+APSETUPPWD?, ouvrir http://192.168.4.1/)')
+o, _ = cmd('AT+APSETUP=0', 5); rec('AT+APSETUP=0 → OK', 'OK' in o)
+o, _ = cmd('AT+APSETUP?'); rec('AT+APSETUP? → 0', '+APSETUP:0' in o)
+
+# ------------------------------------------------------------ 10. second port USB (US-T17), en option
+if TNFS_USB:
+    hd('10. Second port USB TNFS (US-T17)')
+    o, _ = cmd('AT$TNFSUSB?'); was = '1' if '$TNFSUSB:1' in o else '0'
+    rec('AT$TNFSUSB? lisible', '$TNFSUSB:' in o, f'valeur d\'origine {was}')
+    if was == '0':
+        o, _ = cmd('AT$TNFSUSB=1'); rec('AT$TNFSUSB=1 → OK', 'OK' in o)
+        ok_rst, st, dt = reboot(); rec('redémarrage, Wi-Fi rejoint', ok_rst and st in '234', f'{dt:.0f}s')
+    tnfs_dev = PORT[:-1] + str(int(PORT[-1]) + 1)
+    t0 = time.time()
+    while not os.path.exists(tnfs_dev) and time.time() - t0 < 10: time.sleep(0.5)
+    rec(f'{tnfs_dev} présent (interface « TNFS »)', os.path.exists(tnfs_dev))
+    echo = UdpEcho()
+    o, _ = cmd(f'AT$TNFS="{PC_IP}",{echo.port}'); rec('AT$TNFS=PC → OK', 'OK' in o)
+    o, _ = cmd('ATI'); rec('ATI : ligne TNFS', f'TNFS (USB port 2): {PC_IP}:{echo.port}' in o)
+    o, _ = cmd('AT+CIPSTART="TCP","mimuma.pl",80', 15); rec('lien AT TCP ouvert en parallèle', 'CONNECT' in o)
+    try:
+        t = serial.Serial(tnfs_dev, 115200, timeout=0.3); time.sleep(0.5); t.reset_input_buffer()
+        frames_ok = 0
+        for size in (5, 532, 1472):
+            d = bytes((i * 3 + size) & 0xff for i in range(size))
+            t.write(struct.pack('<H', size) + d)
+            t0 = time.time(); buf = b''
+            while time.time() - t0 < 5 and len(buf) < 2 + size: buf += t.read(4096)
+            frames_ok += buf == struct.pack('<H', size) + d
+        rec('3 trames (5, 532, 1472 o) aller-retour par le PC, identiques', frames_ok == 3, f'{frames_ok}/3')
+        t.write(b'\x00\x00' + struct.pack('<H', 3) + b'abc')        # longueur 0 : resynchronisation
+        time.sleep(1); t.write(struct.pack('<H', 2) + b'ok')
+        t0 = time.time(); buf = b''
+        while time.time() - t0 < 5 and b'ok' not in buf: buf += t.read(4096)
+        rec('longueur invalide → resynchronisation, trame suivante servie', buf.endswith(struct.pack('<H', 2) + b'ok'))
+        t.close()
+    except serial.SerialException as e:
+        rec('ouverture du port TNFS', False, str(e))
+    raw = cmd_raw(b'AT+CIPCLOSE\r\n', 3, lambda b: b'OK' in b)
+    rec('lien AT toujours vivant pendant TNFS (CIPCLOSE → CLOSED)', b'CLOSED' in raw)
+    echo.stop()
+    cmd('AT$TNFS=0')
+    if was == '0':
+        cmd('AT$TNFSUSB=0'); ok_rst, st, dt = reboot()
+        rec('réglage d\'origine remis (AT$TNFSUSB=0), un seul port USB', ok_rst and not os.path.exists(tnfs_dev))
 
 # ------------------------------------------------------------ rapport
 hd('Résumé')
