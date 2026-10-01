@@ -905,6 +905,8 @@ static void bootsel_op(void *ctx)
     reset_usb_boot(0, 0);
 }
 
+static void idle_op(void *ctx) { (void)ctx; wait_ms(1); }   /* AT+HTTPGET/HTTPREAD */
+
 static const char *version_op(void *ctx) { (void)ctx; return PICOW_MODEM_VERSION; }
 static const char *build_op(void *ctx) { (void)ctx; return PICOW_MODEM_BUILD; }
 static const char *build_date_op(void *ctx) { (void)ctx; return PICOW_MODEM_DATE; }
@@ -922,6 +924,7 @@ struct at_modem_ops net_pico_ops = {
     .reset = reset_op, .bootsel = bootsel_op, .version = version_op, .build = build_op, .build_date = build_date_op, .tls_info = tls_info_op, .tls_selftest = tls_selftest_op,
     .udp_connect = udp_connect_op,
     .ap_setup = ap_pico_setup, .ap_setup_ssid = ap_pico_ssid,
+    .idle = idle_op,
 };
 
 bool net_pico_init(struct at_modem *m)

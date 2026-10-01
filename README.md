@@ -74,6 +74,9 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `AT$TNFS="hôte",port` / `=hôte:port` / `=hôte` / `=0` / `?` | serveur TNFS du second port USB (port 16384 par défaut, persistant) ; `$TNFS:"hôte",port` ; `=0` efface ; commande commune avec PicoWiFiModemUSB |
 | `AT$TNFSUSB=1` / `=0` / `?` | second port USB TNFS présent / absent (**défaut : absent**), persistant, pris en compte au prochain démarrage (`AT+RST`) |
 | `AT&W` | `OK` (la configuration est déjà enregistrée à chaque commande) |
+| `AT+HTTPGET="url"[,début[,fin]]` | requête GET (TLS pour `https://`, redirections suivies, `Range` si début/fin) : `+HTTPGET:<code>,<taille ou -1>,"<type>"`, `OK` ; voir « Flux HTTP(S) » |
+| `AT+HTTPREAD=n` (1 ≤ n ≤ 2048) | `+HTTPREAD:<k>,<suite>:` puis k octets du corps, `OK` ; `suite` = 0 : corps terminé |
+| `AT+HTTPCLOSE` | ferme la session HTTP, `OK` |
 | `AT+NHOSTS?` | `+NHOSTS:<actif>,"hôte1",…` : filtrage des hôtes ; **lecture seule** (`AT+NHOSTS=…` → `ERROR`, modifier depuis la page `/hosts`) |
 | `AT+NLOG?` | 16 dernières tentatives : `+NLOG:<âge s>,"TCP|SSL|UDP|DIAL|PING|TNFS|SNTP","hôte",port,allowed|refused` |
 | `AT+APSETUPPWD="…"` / `?` | mot de passe du point d'accès (8 à 63 caractères ASCII imprimables, persistant) ; défaut `neo6502wifi` |
@@ -81,6 +84,37 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 Non pris en charge (répond `ERROR`) : `CIPMUX=1`, forme UDP à 5 paramètres (port local, mode), `ATO`/`ATA` sur un lien UDP (`NO CARRIER`), mode point d'accès,
 TLS 1.3, certificat client, mode transparent ESP (`CIPMODE=1` ; utiliser
 `ATDT` à la place — `ATDT` fait aussi du TLS vers un port de `AT+TLSPORT`).
+
+## Flux HTTP(S)
+
+Le modem fait la requête HTTP et ne rend que le **corps**, que le 6502 lit à son
+rythme : pas d'analyse HTTP ni de TLS côté 6502.
+
+```
+AT+HTTPGET="https://exemple.fr/fichier.bin"
++HTTPGET:200,51234,"application/octet-stream"
+OK
+AT+HTTPREAD=1024
++HTTPREAD:1024,1:<1024 octets>
+OK
+…
+AT+HTTPREAD=1024
++HTTPREAD:34,0:<34 octets>          ← suite = 0 : fin du corps
+OK
+```
+
+- `https://` : TLS terminé sur le Pico W (mêmes vérifications que `AT+CIPSTART="SSL"`).
+- Redirections 301/302/303/307/308 suivies (5 au plus), y compris vers https.
+- `AT+HTTPGET="url",100,199` envoie `Range: bytes=100-199` (réponse `206`) ; `,100` seul :
+  du 100ᵉ octet à la fin.
+- Corps `chunked` décodé ; taille `-1` quand le serveur ne l'annonce pas (fin = fermeture).
+- `AT+HTTPREAD` attend au plus 10 s le premier octet et rend ce qui est déjà arrivé
+  (`k` peut être inférieur à `n`) ; `+HTTPREAD:0,1:` = rien encore, réessayer.
+- La session occupe le lien unique (comme `CIPSTART`) ; pas de `+IPD` pendant ce temps.
+  Erreurs : `bad URL`, `DNS Fail`, `TLS handshake failed`, `host not allowed`,
+  `timeout`, `connection closed`, `bad HTTP response`, `HTTP header too large` (> 2 Ko).
+- Requête : `GET <chemin> HTTP/1.1`, `Host`, `User-Agent: Neo6502picowifi/<version>`,
+  `Accept-Encoding: identity`, `Connection: close`.
 
 ## Hôtes autorisés (filtrage des connexions)
 
@@ -93,7 +127,7 @@ vers un serveur de son choix, le modem peut n'autoriser qu'une liste d'hôtes
   élargir sa propre liste. En AT : lecture seule (`AT+NHOSTS?`) et journal (`AT+NLOG?`).
 - **Désactivé par défaut** (netsetup, prophet, NeoNavigator inchangés).
 - Filtrage actif : `CIPSTART` (TCP, SSL, UDP), `ATDT`, `AT$TNFS` et le port TNFS,
-  `AT+PING`, un nouveau serveur `AT+CIPSNTPCFG` sont refusés (`host not allowed` /
+  `AT+PING`, `AT+HTTPGET` (et chaque redirection), un nouveau serveur `AT+CIPSNTPCFG` sont refusés (`host not allowed` /
   `NO CARRIER`) pour un hôte absent de la liste — le nom est contrôlé **avant** toute
   requête DNS (un nom peut à lui seul transporter des données) ; les **appels entrants**
   sont refusés (`CIPSERVER=1`, `ATA`, réponse automatique) ; les réglages qui permettraient
@@ -225,7 +259,7 @@ défaut = valeur de `netsetup.pas`).
 ```
 make -C tests      # cœur du modem (test_at_modem) + dates TLS (test_tls_date) sur PC, gcc + ASan/UBSan
                    # + point d'accès de configuration : DHCP et DNS captif (test_dhcp_server), page (test_web_setup)
-                   # + trames du port USB TNFS (test_tnfs_link)
+                   # + trames du port USB TNFS (test_tnfs_link), analyse HTTP (test_http_parse)
                    # + magasin de racines : générateur (test_roots2c.py), recherche (test_roots_store),
                    #   rappel contre mbedTLS (test_roots_ca_cb, exige PICO_SDK_PATH ou MBEDTLS_DIR)
 ```
@@ -259,6 +293,7 @@ src/dns_catchall.[ch] DNS captif du point d'accès (portable, testé sur PC)
 src/web_setup.[ch]    page de configuration : HTTP, formulaire, portail captif (portable, testé sur PC)
 src/tnfs_link.[ch]    trames du port USB TNFS et file des réponses (portable, testé sur PC)
 src/tnfs_pico.[ch]    port USB TNFS : lien UDP indépendant, DNS non bloquant
+src/http_parse.[ch]   flux HTTP : URL, redirections, en-têtes, « chunked » (portable, testé sur PC)
 src/tls_date.[ch]     date civile sans gmtime_r (vérification des dates de certificats)
 src/mbedtls_config.h  configuration mbedTLS (client TLS 1.2)
 certs/roots.pem       racines de confiance (magasin Mozilla) ; tools/roots2c.py les compile

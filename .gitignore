@@ -3,6 +3,7 @@ tests/test_at_modem
 tests/test_dhcp_server
 tests/test_web_setup
 tests/test_tnfs_link
+tests/test_http_parse
 tests/test_tls_date
 tests/test_roots_store
 tests/test_roots_ca_cb

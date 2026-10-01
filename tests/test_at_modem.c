@@ -27,6 +27,11 @@ static struct {
     int sends;                   /* appels à tcp_send (un datagramme en UDP) */
     bool last_udp;
     bool ap_on;
+    /* serveur HTTP scripté : réponse par connexion, livrée par morceaux à chaque idle */
+    const char *http_resp[4];
+    size_t http_len[4], http_pos;
+    int conns, idles;
+    bool http_hang;              /* ne pas fermer après la réponse */
     struct at_config saved_cfg;
 } M;
 
@@ -44,11 +49,29 @@ static void minfo(void *c, struct at_ip_info *i) {
 }
 static int mconn(void *c, const char *h, uint16_t p, bool tls) {
     (void)c; strcpy(M.last_host, h); M.last_port = p; M.last_tls = tls;
+    M.conns++; M.http_pos = 0;
     if (tls && M.no_tls) return AT_NET_NO_TLS;
     if (tls && M.no_time) return AT_NET_NO_TIME;
     M.tcp_up = (M.connect_result == AT_NET_OK); return M.connect_result; }
 static const char *mtls(void *c) { (void)c; return M.no_tls ? NULL : "TLS: test 1.2, root: Test Root, time: synced"; }
 static int msend(void *c, const uint8_t *d, size_t n) { (void)c; memcpy(M.sent + M.sent_len, d, n); M.sent_len += n; M.sends++; return AT_NET_OK; }
+static struct at_modem modem;
+static void midle(void *c)
+{
+    (void)c;
+    M.idles++;
+    M.ms += 1;
+    int i = M.conns - 1;
+    if (i < 0 || i > 3 || !M.http_resp[i] || !M.tcp_up) return;
+    size_t len = M.http_len[i] ? M.http_len[i] : strlen(M.http_resp[i]);
+    if (M.http_pos < len) {
+        size_t n = len - M.http_pos < 7 ? len - M.http_pos : 7;    /* petits segments */
+        M.http_pos += at_modem_rx_push(&modem, (const uint8_t *)M.http_resp[i] + M.http_pos, n);
+    } else if (!M.http_hang) {
+        M.tcp_up = false;
+        at_modem_remote_closed(&modem);
+    }
+}
 static int map(void *c, int on) { (void)c; M.ap_on = on; return AT_NET_OK; }
 static const char *mapssid(void *c) { (void)c; return M.ap_on ? "Neo6502-modem-1122" : NULL; }
 static int mudp(void *c, const char *h, uint16_t p) {
@@ -68,10 +91,9 @@ static const char *mver(void *c) { (void)c; return "0.1.0"; }
 
 static const struct at_modem_ops ops = {
     NULL, mw, mms, mjoin, mleave, mwifi, mscan, minfo, mconn, msend, mclose, mtcp,
-    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL, mtls, NULL, NULL, NULL, mudp, map, mapssid,
+    mlisten, maccept, msave, msntp, mping, mreset, mbootsel, mver, NULL, mtls, NULL, NULL, NULL, mudp, map, mapssid, midle,
 };
 
-static struct at_modem modem;
 static int failures, checks;
 
 static void reset_mock(void)
@@ -820,6 +842,167 @@ static void test_host_filter(void)
     CHECK(modem.cfg.hosts_enforce == 0 && modem.cfg.hosts[0][0] == 0);
 }
 
+/* US-T11 : AT+HTTPGET / AT+HTTPREAD / AT+HTTPCLOSE */
+static void http_setup(void)
+{
+    reset_mock();
+    M.wifi_up = true;
+    send("ATE0\r\n"); clear_out();
+}
+
+/* corps reçu dans la sortie : concatène les données des +HTTPREAD */
+static size_t read_all(char *dst, size_t cap, int *reads)
+{
+    size_t total = 0;
+    *reads = 0;
+    for (int guard = 0; guard < 2000; guard++) {
+        clear_out();
+        send("AT+HTTPREAD=100\r\n");
+        unsigned k; int more;
+        char *h = strstr(M.out, "+HTTPREAD:");
+        if (!h || sscanf(h, "+HTTPREAD:%u,%d:", &k, &more) != 2) return (size_t)-1;
+        char *data = strchr(h, ':');
+        data = strchr(data + 1, ':') + 1;
+        if (total + k <= cap) memcpy(dst + total, data, k);
+        total += k;
+        (*reads)++;
+        if (strcmp(data + k, "\r\nOK\r\n")) return (size_t)-2;
+        if (!more) break;
+    }
+    return total;
+}
+
+static void test_http(void)
+{
+    char body[4096];
+    int reads;
+
+    /* GET simple avec Content-Length ; requête envoyée */
+    http_setup();
+    M.http_resp[0] = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nhello world";
+    send("AT+HTTPGET=\"http://example.com/a/b?x=1\"\r\n");
+    CHECK_OUT("+HTTPGET:200,11,\"text/plain\"\r\n\r\nOK\r\n");
+    CHECK(!strcmp(M.last_host, "example.com") && M.last_port == 80 && !M.last_tls);
+    M.sent[M.sent_len] = 0;
+    CHECK(strstr((char *)M.sent, "GET /a/b?x=1 HTTP/1.1\r\nHost: example.com\r\n") == (char *)M.sent);
+    CHECK(strstr((char *)M.sent, "Connection: close\r\n") && strstr((char *)M.sent, "\r\n\r\n"));
+    CHECK(!strstr((char *)M.sent, "Range:"));
+    CHECK(read_all(body, sizeof body, &reads) == 11 && !memcmp(body, "hello world", 11));
+    CHECK_OUT(",0:");                                       /* fin signalée */
+    CHECK_NOT_OUT("+IPD"); CHECK_NOT_OUT("CLOSED");
+    clear_out();
+    send("AT+HTTPREAD=10\r\n"); CHECK_OUT("+HTTPREAD:0,0:\r\nOK"); clear_out();   /* après la fin */
+    send("AT+HTTPCLOSE\r\n"); CHECK_OUT("OK"); clear_out();
+    send("AT+HTTPREAD=10\r\n"); CHECK_OUT("no HTTP session"); CHECK_OUT("ERROR"); clear_out();
+
+    /* HTTPS, port non standard, Range, corps « chunked » découpé en segments de 7 */
+    http_setup();
+    M.http_resp[0] = "HTTP/1.1 206 Partial Content\r\nTransfer-Encoding: chunked\r\n\r\n"
+                     "5\r\nhello\r\n1;ext=1\r\n \r\nA\r\n0123456789\r\n0\r\nX-T: 1\r\n\r\n";
+    send("AT+HTTPGET=\"https://files.example:8443/f.bin\",100,199\r\n");
+    CHECK_OUT("+HTTPGET:206,-1,\"\"");
+    CHECK(M.last_tls && M.last_port == 8443);
+    M.sent[M.sent_len] = 0;
+    CHECK(strstr((char *)M.sent, "Host: files.example:8443\r\n") && strstr((char *)M.sent, "Range: bytes=100-199\r\n"));
+    CHECK(read_all(body, sizeof body, &reads) == 16 && !memcmp(body, "hello 0123456789", 16));
+    clear_out();
+
+    /* corps jusqu'à la fermeture (ni longueur ni chunked), gros corps, lectures multiples */
+    http_setup();
+    static char big[3000];
+    char *q = big + sprintf(big, "HTTP/1.0 200 OK\r\n\r\n");
+    for (int i = 0; i < 2500; i++) *q++ = (char)('a' + i % 26);
+    *q = 0;
+    M.http_resp[0] = big;
+    send("AT+HTTPGET=\"http://x.fr\"\r\n"); CHECK_OUT("+HTTPGET:200,-1,");
+    size_t got = read_all(body, sizeof body, &reads);
+    CHECK(got == 2500 && body[2499] == 'a' + 2499 % 26 && reads >= 25);
+    clear_out();
+
+    /* redirections : relative puis absolue vers https ; la dernière réponse est rendue */
+    http_setup();
+    M.http_resp[0] = "HTTP/1.1 301 Moved\r\nLocation: /new\r\nContent-Length: 0\r\n\r\n";
+    M.http_resp[1] = "HTTP/1.1 302 Found\r\nLocation: https://cdn.example/final\r\n\r\n";
+    M.http_resp[2] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+    send("AT+HTTPGET=\"http://example.com/old\"\r\n");
+    CHECK_OUT("+HTTPGET:200,2,");
+    CHECK(M.conns == 3 && !strcmp(M.last_host, "cdn.example") && M.last_tls && M.last_port == 443);
+    M.sent[M.sent_len] = 0;
+    CHECK(strstr((char *)M.sent, "GET /new HTTP/1.1\r\nHost: example.com") && strstr((char *)M.sent, "GET /final HTTP/1.1\r\nHost: cdn.example\r\n"));
+    CHECK(read_all(body, sizeof body, &reads) == 2 && !memcmp(body, "ok", 2));
+    clear_out();
+
+    /* trop de redirections : la 6e réponse 302 est rendue telle quelle */
+    http_setup();
+    for (int i = 0; i < 4; i++) M.http_resp[i] = "HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\n\r\n";
+    send("AT+HTTPGET=\"http://example.com/\"\r\n");
+    CHECK(M.conns <= 6);
+    clear_out();
+
+    /* 404, 204 */
+    http_setup();
+    M.http_resp[0] = "HTTP/1.1 404 Not Found\r\nContent-Length: 3\r\n\r\nnon";
+    send("AT+HTTPGET=\"http://example.com/x\"\r\n"); CHECK_OUT("+HTTPGET:404,3,"); clear_out();
+    http_setup();
+    M.http_resp[0] = "HTTP/1.1 204 No Content\r\n\r\n";
+    send("AT+HTTPGET=\"http://example.com/x\"\r\n"); CHECK_OUT("+HTTPGET:204,0,"); clear_out();
+    send("AT+HTTPREAD=5\r\n"); CHECK_OUT("+HTTPREAD:0,0:"); clear_out();
+
+    /* erreurs */
+    http_setup();
+    send("AT+HTTPGET=\"ftp://x\"\r\n"); CHECK_OUT("bad URL"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+HTTPGET=\"http://x\",5,2\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+HTTPGET=\"http://x\"z\r\n"); CHECK_OUT("ERROR"); clear_out();
+    M.connect_result = AT_NET_DNS_FAIL;
+    send("AT+HTTPGET=\"http://inconnu.invalid/\"\r\n"); CHECK_OUT("DNS Fail"); CHECK_OUT("ERROR"); clear_out();
+    M.connect_result = AT_NET_OK;
+    M.conns = 0;
+    M.http_resp[0] = "garbage\r\n\r\n";
+    send("AT+HTTPGET=\"http://x.fr/\"\r\n"); CHECK_OUT("bad HTTP response"); CHECK(!M.tcp_up); clear_out();
+    M.conns = 0;
+    M.http_resp[0] = "HTTP/1.1 200";                 /* fermé avant la fin des en-têtes */
+    send("AT+HTTPGET=\"http://x.fr/\"\r\n"); CHECK_OUT("connection closed"); clear_out();
+    M.conns = 0;
+    M.http_resp[0] = "HTTP/1.1 200 OK\r\n";       /* serveur muet : délai de 10 s */
+    M.http_hang = true;
+    send("AT+HTTPGET=\"http://x.fr/\"\r\n"); CHECK_OUT("timeout"); CHECK(!M.tcp_up); clear_out();
+    M.http_hang = false;
+    M.wifi_up = false;
+    send("AT+HTTPGET=\"http://x.fr/\"\r\n"); CHECK_OUT("no ip"); clear_out();
+    M.wifi_up = true;
+    send("AT+HTTPREAD=0\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+HTTPREAD=2049\r\n"); CHECK_OUT("ERROR"); clear_out();
+
+    /* lien AT déjà ouvert ; filtre d'hôtes */
+    http_setup();
+    send("AT+CIPSTART=\"TCP\",\"example.com\",80\r\n"); clear_out();
+    send("AT+HTTPGET=\"http://example.com/\"\r\n"); CHECK_OUT("ALREADY CONNECTED"); clear_out();
+    send("AT+CIPCLOSE\r\n"); clear_out();
+    modem.cfg.hosts_enforce = 1;
+    strcpy(modem.cfg.hosts[0], "example.com");
+    M.conns = 0;
+    M.http_resp[0] = "HTTP/1.1 302 Found\r\nLocation: http://evil.com/\r\n\r\n";
+    send("AT+HTTPGET=\"http://example.com/\"\r\n"); CHECK_OUT("host not allowed"); CHECK(M.conns == 1); clear_out();
+    send("AT+NLOG?\r\n"); CHECK_OUT("\"HTTP\",\"evil.com\",80,refused"); clear_out();
+    modem.cfg.hosts_enforce = 0;
+
+    /* session HTTP terminée, puis CIPSTART : +IPD rétablis ; ATH clôt une session */
+    http_setup();
+    M.http_resp[0] = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nz";
+    send("AT+HTTPGET=\"http://x.fr/\"\r\n"); clear_out();
+    read_all(body, sizeof body, &reads);
+    M.http_resp[1] = NULL;
+    send("AT+CIPSTART=\"TCP\",\"x.fr\",23\r\n"); CHECK_OUT("CONNECT"); clear_out();
+    at_modem_rx_push(&modem, (const uint8_t *)"abc", 3); at_modem_poll(&modem);
+    CHECK_OUT("+IPD,3:abc"); clear_out();
+    send("AT+CIPCLOSE\r\n"); clear_out();
+    /* plateforme sans idle : HTTP non supporté */
+    struct at_modem_ops no_idle = ops;
+    no_idle.idle = NULL;
+    at_modem_init(&modem, &no_idle, NULL);
+    send("AT+HTTPGET=\"http://x.fr/\"\r\n"); CHECK_OUT("ERROR"); clear_out();
+}
+
 int main(void)
 {
     test_basic();
@@ -831,6 +1014,7 @@ int main(void)
     test_ap_setup();
     test_tnfs_config();
     test_host_filter();
+    test_http();
     test_hayes();
     test_tls();
     test_config_persist();

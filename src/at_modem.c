@@ -345,6 +345,7 @@ static void go_online(struct at_modem *m)
 
 static void hangup(struct at_modem *m)
 {
+    m->http.active = false;
     if (m->ops->tcp_connected(m->ops->ctx)) m->ops->tcp_close(m->ops->ctx);
     if (m->link_udp) { m->link_udp = false; rx_flush(m); }  /* datagrammes non lus */
     m->remote_closed = false;
@@ -366,6 +367,7 @@ static void do_dial(struct at_modem *m, const char *arg)
         if (!parse_int(&p, &port) || port < 1 || port > 65535) { error(m); return; }
     }
     if (!m->ops->wifi_connected(m->ops->ctx)) { out(m, "\r\nNO CARRIER\r\n"); return; }
+    if (m->http.active && !m->ops->tcp_connected(m->ops->ctx)) m->http.active = false;
     if (m->ops->tcp_connected(m->ops->ctx)) { error(m); return; }
     if (!check_host(m, "DIAL", host, (uint16_t)port)) { out(m, "\r\nNO CARRIER\r\n"); return; }
     int r = m->ops->tcp_connect(m->ops->ctx, host, (uint16_t)port,
@@ -473,6 +475,153 @@ static bool hayes(struct at_modem *m, const char *cmd)
 }
 
 /* ------------------------------------------------------- AT+ ESP8266 */
+
+/* ------------------------------------------------------ HTTP (US-T11) */
+
+#define HTTP_TIMEOUT_MS  10000
+#define HTTP_REDIRECTS   5
+
+static int pop_byte(struct at_modem *m)
+{
+    uint8_t b;
+    return rx_pop(m, &b, 1) ? b : -1;
+}
+
+/* Messages d'échec de connexion, comme AT+CIPSTART. */
+static void connect_error(struct at_modem *m, int r)
+{
+    if (r == AT_NET_DNS_FAIL) out(m, "DNS Fail\r\n");
+    else if (r == AT_NET_NO_TIME) out(m, "no time (SNTP) for TLS\r\n");
+    else if (r == AT_NET_TLS_FAIL) out(m, "TLS handshake failed\r\n");
+    else if (r == AT_NET_NO_TLS) out(m, "no TLS\r\n");
+    error(m);
+}
+
+static void http_fail(struct at_modem *m, const char *why)
+{
+    hangup(m);
+    rx_flush(m);
+    out(m, why);
+    error(m);
+}
+
+/* AT+HTTPGET="url"[,début[,fin]] : GET (TLS pour https), redirections
+   suivies (5 au plus), en-têtes gardés dans le modem.
+   → +HTTPGET:<code>,<taille ou -1>,"<type>" puis OK ; le corps se lit par
+   AT+HTTPREAD. Occupe le lien unique (comme CIPSTART). */
+static void http_get(struct at_modem *m, const char *p)
+{
+    static char url[AT_LINE_MAX];
+    static char hdr[HTTP_HDR_MAX];
+    static struct http_resp resp;
+    long from = -1, to = -1;
+    struct http_url u;
+    if (!m->ops->idle || !parse_quoted(&p, url, sizeof url)) { error(m); return; }
+    if (skip_comma(&p)) {
+        if (!parse_int(&p, &from) || from < 0) { error(m); return; }
+        if (skip_comma(&p) && (!parse_int(&p, &to) || to < from)) { error(m); return; }
+    }
+    if (*p) { error(m); return; }
+    if (!http_url_parse(url, &u)) { out(m, "bad URL\r\n"); error(m); return; }
+    if (m->http.active) hangup(m);                          /* session précédente */
+    if (m->ops->tcp_connected(m->ops->ctx)) { out(m, "ALREADY CONNECTED\r\n"); error(m); return; }
+    if (!m->ops->wifi_connected(m->ops->ctx)) { out(m, "no ip\r\n"); error(m); return; }
+
+    for (int hop = 0; ; hop++) {
+        if (!check_host(m, u.https ? "HTTPS" : "HTTP", u.host, u.port)) {
+            out(m, "host not allowed\r\n"); error(m); return;
+        }
+        rx_flush(m);
+        m->remote_closed = false;
+        int r = m->ops->tcp_connect(m->ops->ctx, u.host, u.port, u.https);
+        if (r != AT_NET_OK) { connect_error(m, r); return; }
+        m->was_connected = true;
+        m->link_udp = false;
+
+        /* requête : HTTP/1.1, une seule par connexion */
+        char *req = (char *)m->send_buf;
+        int n = snprintf(req, AT_SEND_MAX, "GET %s HTTP/1.1\r\nHost: %s", u.path, u.host);
+        if (u.port != (u.https ? 443 : 80)) n += snprintf(req + n, AT_SEND_MAX - (size_t)n, ":%u", u.port);
+        n += snprintf(req + n, AT_SEND_MAX - (size_t)n, "\r\nUser-Agent: Neo6502picowifi/%s\r\n"
+                      "Accept-Encoding: identity\r\nConnection: close\r\n", m->ops->version(m->ops->ctx));
+        if (from >= 0 && to >= 0) n += snprintf(req + n, AT_SEND_MAX - (size_t)n, "Range: bytes=%ld-%ld\r\n", from, to);
+        else if (from >= 0) n += snprintf(req + n, AT_SEND_MAX - (size_t)n, "Range: bytes=%ld-\r\n", from);
+        n += snprintf(req + n, AT_SEND_MAX - (size_t)n, "\r\n");
+        if (m->ops->tcp_send(m->ops->ctx, m->send_buf, (size_t)n) != AT_NET_OK) {
+            http_fail(m, "send failed\r\n"); return;
+        }
+
+        /* en-têtes : jusqu'à la ligne vide ; la suite reste dans le tampon */
+        size_t hl = 0;
+        uint32_t t0 = now(m);
+        for (;;) {
+            int b = pop_byte(m);
+            if (b >= 0) {
+                if (hl == sizeof hdr) { http_fail(m, "HTTP header too large\r\n"); return; }
+                hdr[hl++] = (char)b;
+                if (hl >= 4 && !memcmp(hdr + hl - 4, "\r\n\r\n", 4)) break;
+                continue;
+            }
+            if (m->remote_closed) { http_fail(m, "connection closed\r\n"); return; }
+            if (now(m) - t0 >= HTTP_TIMEOUT_MS) { http_fail(m, "timeout\r\n"); return; }
+            m->ops->idle(m->ops->ctx);
+        }
+        if (!http_resp_parse(hdr, hl, &resp)) { http_fail(m, "bad HTTP response\r\n"); return; }
+        struct http_url next;
+        if (http_is_redirect(&resp) && hop < HTTP_REDIRECTS && http_url_resolve(&u, resp.location, &next)) {
+            hangup(m);
+            u = next;
+            continue;
+        }
+        break;
+    }
+    m->http.active = true;
+    m->http.chunked = resp.chunked;
+    m->http.remaining = resp.content_length;
+    http_chunked_init(&m->http.ch);
+    if (resp.status == 204 || resp.status == 304 || (resp.status >= 100 && resp.status < 200)) m->http.remaining = 0;
+    if (m->http.chunked) m->http.remaining = -1;
+    m->http.eof = m->http.remaining == 0;
+    outf(m, "+HTTPGET:%d,%ld,\"%s\"\r\n", resp.status, m->http.remaining, resp.content_type);
+    ok(m);
+}
+
+/* AT+HTTPREAD=n (1..2048) → +HTTPREAD:<k>,<suite 0|1>: puis k octets du
+   corps, puis OK. Attend au plus 10 s le premier octet ; k = 0 avec suite = 1
+   si rien n'est encore arrivé ; suite = 0 : corps terminé (lien fermé). */
+static void http_read(struct at_modem *m, const char *p)
+{
+    long n;
+    if (!parse_int(&p, &n) || n < 1 || n > AT_SEND_MAX || *p) { error(m); return; }
+    if (!m->http.active) { out(m, "no HTTP session\r\n"); error(m); return; }
+    uint8_t *buf = m->send_buf;
+    size_t k = 0;
+    uint32_t t0 = now(m);
+    while (k < (size_t)n && !m->http.eof) {
+        int b = pop_byte(m);
+        if (b < 0) {
+            if (m->remote_closed) { m->http.eof = true; break; }   /* fin (ou corps tronqué) */
+            if (k > 0 || now(m) - t0 >= HTTP_TIMEOUT_MS) break;
+            m->ops->idle(m->ops->ctx);
+            continue;
+        }
+        if (m->http.chunked) {
+            if (http_chunked_feed(&m->http.ch, (uint8_t)b)) buf[k++] = (uint8_t)b;
+            if (m->http.ch.done || m->http.ch.error) m->http.eof = true;
+        } else {
+            buf[k++] = (uint8_t)b;
+            if (m->http.remaining > 0 && --m->http.remaining == 0) m->http.eof = true;
+        }
+    }
+    outf(m, "+HTTPREAD:%u,%d:", (unsigned)k, m->http.eof ? 0 : 1);
+    m->ops->write(m->ops->ctx, buf, k);
+    ok(m);
+    if (m->http.eof && m->ops->tcp_connected(m->ops->ctx)) {
+        m->ops->tcp_close(m->ops->ctx);                    /* session gardée : HTTPREAD → 0,0 */
+        rx_flush(m);
+        m->remote_closed = false;
+    }
+}
 
 /* US-T12 : avec le filtrage actif, un programme 6502 ne doit pas pouvoir
    détourner un hôte autorisé (autre réseau Wi-Fi, DNS ou passerelle à lui) :
@@ -670,6 +819,7 @@ static void plus_command(struct at_modem *m, const char *cmd)
         if (!parse_quoted(&p, type, sizeof type) || !skip_comma(&p)
             || !parse_quoted(&p, host, sizeof host) || !skip_comma(&p)
             || !parse_int(&p, &port) || port < 1 || port > 65535) { error(m); return; }
+        if (m->http.active && !m->ops->tcp_connected(m->ops->ctx)) m->http.active = false;  /* session HTTP finie */
         bool tls = false, udp = false;
         if (!strcmp(type, "TCP")) tls = at_modem_port_is_tls(&m->cfg, (uint16_t)port);
         else if (!strcmp(type, "SSL")) tls = true;
@@ -744,6 +894,13 @@ static void plus_command(struct at_modem *m, const char *cmd)
         int ms = m->ops->ping ? m->ops->ping(m->ops->ctx, host) : -1;
         if (ms < 0) { out(m, "+timeout\r\n"); error(m); return; }
         outf(m, "+%d\r\n", ms);
+        ok(m);
+    } else if (starts(cmd, "HTTPGET=", &p)) {
+        http_get(m, p);
+    } else if (starts(cmd, "HTTPREAD=", &p)) {
+        http_read(m, p);
+    } else if (!strcmp(cmd, "HTTPCLOSE")) {
+        if (m->http.active) hangup(m);
         ok(m);
     } else if (!strcmp(cmd, "NHOSTS?")) {
         /* US-T12 : lecture seule ; modification depuis la page du point d'accès */
@@ -987,7 +1144,7 @@ void at_modem_poll(struct at_modem *m)
         outf(m, "\r\n+IPD,%u:", (unsigned)n);
         m->ops->write(m->ops->ctx, buf, n);
     }
-    while (!m->link_udp && rx_used(m) > 0 && m->mode != AT_MODE_CIPSEND) {
+    while (!m->link_udp && !m->http.active && rx_used(m) > 0 && m->mode != AT_MODE_CIPSEND) {
         size_t n = rx_pop(m, buf, 1460);
         if (m->mode == AT_MODE_ONLINE) {
             m->ops->write(m->ops->ctx, buf, n);
@@ -998,7 +1155,7 @@ void at_modem_poll(struct at_modem *m)
     }
 
     /* fermeture distante */
-    if (m->remote_closed && rx_used(m) == 0 && m->mode != AT_MODE_CIPSEND) {
+    if (m->remote_closed && !m->http.active && rx_used(m) == 0 && m->mode != AT_MODE_CIPSEND) {
         m->remote_closed = false;
         if (m->mode == AT_MODE_ONLINE) {
             m->mode = AT_MODE_COMMAND;

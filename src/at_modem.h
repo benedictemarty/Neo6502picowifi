@@ -17,6 +17,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "http_parse.h"
+
 #define AT_LINE_MAX      256   /* longueur max d'une ligne de commande       */
 #define AT_SSID_MAX      32
 #define AT_PASS_MAX      64
@@ -135,6 +137,9 @@ struct at_modem_ops {
        AT_NET_OK. ap_setup_ssid : SSID si ouvert, NULL si fermé. NULL = absent. */
     int  (*ap_setup)(void *ctx, int on);
     const char *(*ap_setup_ssid)(void *ctx);
+    /* Attente active (~1 ms) pendant AT+HTTPGET / AT+HTTPREAD : le réseau
+       continue de tourner, le watchdog est servi. NULL = HTTP non supporté. */
+    void (*idle)(void *ctx);
 };
 
 /* Vrai si le port est dans la liste AT+TLSPORT. */
@@ -190,6 +195,15 @@ struct at_modem {
     volatile bool remote_closed;
     bool     was_connected;
     bool     link_udp;         /* lien ouvert en UDP : tampon en datagrammes */
+
+    /* US-T11 : session HTTP en cours (AT+HTTPGET / AT+HTTPREAD) */
+    struct {
+        bool   active;         /* +IPD et CLOSED suspendus : corps lu par HTTPREAD */
+        bool   eof;
+        bool   chunked;
+        long   remaining;      /* octets du corps restants, -1 = jusqu'à la fermeture */
+        struct http_chunked ch;
+    } http;
 
     /* US-T12 : dernières tentatives de connexion (anneau) */
     struct at_log_entry log[AT_LOG_MAX];
