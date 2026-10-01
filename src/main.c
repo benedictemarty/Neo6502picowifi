@@ -123,7 +123,7 @@ int main(void)
     /* comme l'ESP8266 : rejoint le dernier réseau enregistré, en tâche de fond
        (tentatives répétées, commandes AT disponibles tout de suite) */
     if (wifi_ok && modem.cfg.ssid[0]) net_pico_background_join(true);
-    if (wifi_ok && modem.cfg.listen_port)
+    if (wifi_ok && modem.cfg.listen_port && !modem.cfg.hosts_enforce)   /* US-T12 : entrants refusés */
         net_pico_ops.tcp_listen(NULL, modem.cfg.listen_port);
     struct reset_state rs = {
         .by_watchdog = watchdog_caused_reboot(),

@@ -32,6 +32,7 @@ static enum { RES_NONE, RES_PENDING, RES_OK, RES_FAIL } volatile res;
 static volatile unsigned res_gen;        /* invalide une résolution devenue obsolète */
 static uint8_t pending[TNFS_DGRAM_MAX];  /* dernier datagramme reçu pendant le DNS */
 static size_t pending_len;
+static bool allowed_seen = true;         /* un refus n'est journalisé qu'une fois de suite */
 
 static void on_udp(void *arg, struct udp_pcb *p, struct pbuf *buf, const ip_addr_t *a, u16_t port)
 {
@@ -98,6 +99,12 @@ static void on_frame(void *ctx, const uint8_t *d, size_t len)
     (void)ctx;
     struct at_modem *m = net_pico_modem();
     if (!m->cfg.tnfs_host[0] || !net_pico_ops.wifi_connected(NULL)) return;
+    if (!at_modem_host_allowed(&m->cfg, m->cfg.tnfs_host)) {   /* US-T12 : liste changée depuis AT$TNFS */
+        if (allowed_seen) at_modem_log(m, "TNFS", m->cfg.tnfs_host, m->cfg.tnfs_port, false);
+        allowed_seen = false;
+        return;
+    }
+    allowed_seen = true;
     if (strcmp(cur_host, m->cfg.tnfs_host) || cur_port != m->cfg.tnfs_port) {
         reset_link();                    /* AT$TNFS a changé */
         strcpy(cur_host, m->cfg.tnfs_host);

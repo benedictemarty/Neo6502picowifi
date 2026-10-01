@@ -726,6 +726,100 @@ static void test_tnfs_config(void)
     send("AT$TNFSUSB=0\r\n"); CHECK_OUT("OK"); CHECK(modem.cfg.tnfs_usb == 0); clear_out();
 }
 
+/* US-T12 : filtrage des hôtes, journal, lecture seule en AT */
+static void test_host_filter(void)
+{
+    reset_mock();
+    M.wifi_up = true;
+    send("ATE0\r\n"); clear_out();
+    CHECK(at_modem_host_allowed(&modem.cfg, "nimporte.ou"));          /* inactif par défaut */
+    send("AT+NHOSTS?\r\n"); CHECK_OUT("+NHOSTS:0\r\n"); clear_out();
+    send("ATI\r\n"); CHECK_OUT("host filter: off\r\n"); clear_out();
+    send("AT+NHOSTS=1,\"x\"\r\n"); CHECK_OUT("read-only"); CHECK_OUT("ERROR"); CHECK(!modem.cfg.hosts_enforce); clear_out();
+
+    /* motifs */
+    CHECK(at_modem_host_pattern_valid("a.b-c.fr") && at_modem_host_pattern_valid("*.neonav.fr")
+          && at_modem_host_pattern_valid("192.168.1.10"));
+    CHECK(!at_modem_host_pattern_valid("") && !at_modem_host_pattern_valid("*") && !at_modem_host_pattern_valid("*.")
+          && !at_modem_host_pattern_valid("a*.fr") && !at_modem_host_pattern_valid("a b") && !at_modem_host_pattern_valid("a:80"));
+
+    /* activé (comme depuis la page web) */
+    modem.cfg.hosts_enforce = 1;
+    strcpy(modem.cfg.hosts[0], "mimuma.pl");
+    strcpy(modem.cfg.hosts[2], "*.neonav.fr");
+    CHECK(at_modem_host_allowed(&modem.cfg, "MIMUMA.pl") && at_modem_host_allowed(&modem.cfg, "a.b.neonav.fr"));
+    CHECK(!at_modem_host_allowed(&modem.cfg, "neonav.fr") && !at_modem_host_allowed(&modem.cfg, "xneonav.fr")
+          && !at_modem_host_allowed(&modem.cfg, "mimuma.pl.evil.com") && !at_modem_host_allowed(&modem.cfg, ""));
+    send("AT+NHOSTS?\r\n"); CHECK_OUT("+NHOSTS:1,\"mimuma.pl\",\"*.neonav.fr\"\r\n"); clear_out();
+    send("ATI\r\n"); CHECK_OUT("host filter: on, 2 host(s) allowed"); clear_out();
+
+    /* chaque chemin sortant */
+    M.last_host[0] = 0;
+    send("AT+CIPSTART=\"TCP\",\"evil.com\",80\r\n"); CHECK_OUT("host not allowed"); CHECK_OUT("ERROR");
+    CHECK(M.last_host[0] == 0 && !M.tcp_up); clear_out();
+    send("AT+CIPSTART=\"UDP\",\"evil.com\",16384\r\n"); CHECK_OUT("host not allowed"); CHECK(!M.tcp_up); clear_out();
+    send("AT+CIPSTART=\"SSL\",\"secret.evil.com\",443\r\n"); CHECK_OUT("host not allowed"); clear_out();
+    send("ATDTevil.com:23\r\n"); CHECK_OUT("NO CARRIER"); CHECK(!M.tcp_up); clear_out();
+    send("AT+PING=\"donnees-secretes.evil.com\"\r\n"); CHECK_OUT("host not allowed"); CHECK_OUT("ERROR"); clear_out();
+    send("AT$TNFS=\"evil.com\",16384\r\n"); CHECK_OUT("host not allowed"); CHECK(modem.cfg.tnfs_host[0] == 0); clear_out();
+    send("AT+CIPSNTPCFG=1,1,\"x.evil.com\"\r\n"); CHECK_OUT("host not allowed"); CHECK(strcmp(modem.cfg.sntp_server, "x.evil.com")); clear_out();
+    send("AT+CIPSNTPCFG=1,2\r\n"); CHECK_OUT("OK"); clear_out();             /* serveur inchangé : accepté */
+    send("AT+CIPSTART=\"TCP\",\"www.neonav.fr\",6510\r\n"); CHECK_OUT("CONNECT"); CHECK(M.tcp_up); clear_out();
+    send("AT+CIPCLOSE\r\n"); clear_out();
+    /* entrants refusés */
+    send("AT+CIPSERVER=1,23\r\n"); CHECK_OUT("incoming calls disabled"); CHECK_OUT("ERROR"); clear_out();
+    send("AT+CIPSERVER=0\r\n"); CHECK_OUT("OK"); clear_out();
+    M.listen_pending = true;
+    send("ATA\r\n"); CHECK_OUT("NO CARRIER"); CHECK(M.listen_pending); clear_out();
+    modem.cfg.s0 = 1;
+    at_modem_ring(&modem); at_modem_poll(&modem);
+    CHECK_OUT("RING"); CHECK(M.listen_pending && modem.mode == AT_MODE_COMMAND); clear_out();
+    M.listen_pending = false; modem.cfg.s0 = 0;
+
+    /* réglages réseau verrouillés (détournement d'un hôte autorisé) ; lectures permises */
+    const char *lockedc[] = { "AT+CWJAP_DEF=\"Pirate\",\"x\"", "AT+CWJAP=\"Pirate\",\"\"", "AT+CIPDNS_CUR=1,\"6.6.6.6\"",
+                              "AT+CIPSTA_DEF=\"192.168.1.9\",\"192.168.1.66\",\"255.255.255.0\"", "AT+CWDHCP_DEF=1,0",
+                              "AT+APSETUPPWD=\"complice123\"" };
+    for (size_t i = 0; i < sizeof lockedc / sizeof lockedc[0]; i++) {
+        char line[128];
+        snprintf(line, sizeof line, "%s\r\n", lockedc[i]);
+        send(line); CHECK_OUT("locked by host filter"); CHECK_OUT("ERROR"); clear_out();
+    }
+    CHECK(strcmp(M.last_ssid, "Pirate") && modem.cfg.dhcp == 1 && strcmp(modem.cfg.dns, "6.6.6.6")
+          && strcmp(modem.cfg.ap_pass, "complice123"));
+    send("AT+CWJAP?\r\n"); CHECK_NOT_OUT("locked"); clear_out();
+    send("AT+CIPDNS_CUR?\r\n"); CHECK_NOT_OUT("locked"); clear_out();
+
+    /* journal : plus récent d'abord */
+    M.ms = 5000;
+    send("AT+NLOG?\r\n");
+    CHECK_OUT("+NLOG:5,\"TCP\",\"www.neonav.fr\",6510,allowed\r\n");
+    CHECK_OUT("\"PING\",\"donnees-secretes.evil.com\",0,refused");
+    CHECK_OUT("\"DIAL\",\"evil.com\",23,refused");
+    CHECK_OUT("\"SNTP\",\"x.evil.com\",123,refused");
+    CHECK(strstr(M.out, "www.neonav.fr") < strstr(M.out, "\"UDP\""));
+    clear_out();
+    const struct at_log_entry *e = at_modem_log_get(&modem, 0);
+    CHECK(e && e->allowed && !strcmp(e->kind, "TCP"));
+    /* anneau : 16 dernières entrées */
+    for (int i = 0; i < 40; i++) at_modem_log(&modem, "TNFS", "h", (uint16_t)i, true);
+    CHECK(at_modem_log_get(&modem, 0)->port == 39 && at_modem_log_get(&modem, AT_LOG_MAX - 1)->port == 24);
+    CHECK(at_modem_log_get(&modem, AT_LOG_MAX) == NULL);
+
+    /* flash abîmée : entrée invalide effacée, mode inconnu → filtrage actif */
+    struct at_config cfg = modem.cfg;
+    cfg.hosts_enforce = 7;
+    strcpy(cfg.hosts[1], "bad host");
+    memset(cfg.hosts[5], 'z', sizeof cfg.hosts[5]);                    /* sans zéro final */
+    at_modem_init(&modem, &ops, &cfg);
+    CHECK(modem.cfg.hosts_enforce == 1 && modem.cfg.hosts[1][0] == 0 && !strcmp(modem.cfg.hosts[0], "mimuma.pl"));
+    CHECK(strlen(modem.cfg.hosts[5]) == AT_HOST_MAX);
+    /* migration v2 : filtrage inactif, liste vide */
+    cfg.magic = AT_CONFIG_MAGIC_V2;
+    at_modem_init(&modem, &ops, &cfg);
+    CHECK(modem.cfg.hosts_enforce == 0 && modem.cfg.hosts[0][0] == 0);
+}
+
 int main(void)
 {
     test_basic();
@@ -736,6 +830,7 @@ int main(void)
     test_udp();
     test_ap_setup();
     test_tnfs_config();
+    test_host_filter();
     test_hayes();
     test_tls();
     test_config_persist();

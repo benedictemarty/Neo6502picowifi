@@ -169,6 +169,72 @@ static bool has_tls(struct at_modem *m)
     return m->ops->tls_info && m->ops->tls_info(m->ops->ctx) != NULL;
 }
 
+/* ------------------------------------------------- hôtes autorisés (US-T12) */
+
+bool at_modem_host_pattern_valid(const char *p)
+{
+    size_t n = strlen(p);
+    if (n == 0 || n > AT_HOST_MAX) return false;
+    if (p[0] == '*') {
+        if (p[1] != '.' || n < 3) return false;
+        p += 2;
+    }
+    for (; *p; p++)
+        if (!isalnum((unsigned char)*p) && *p != '.' && *p != '-') return false;
+    return true;
+}
+
+static bool ieq(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++)
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return false;
+    return *a == *b;
+}
+
+bool at_modem_host_allowed(const struct at_config *cfg, const char *host)
+{
+    if (!cfg->hosts_enforce) return true;
+    size_t hl = strlen(host);
+    for (int i = 0; i < AT_HOSTS_MAX; i++) {
+        const char *pat = cfg->hosts[i];
+        if (!pat[0]) continue;
+        if (pat[0] == '*') {
+            const char *suffix = pat + 1;            /* ".domaine" */
+            size_t sl = strlen(suffix);
+            if (hl > sl && ieq(host + hl - sl, suffix)) return true;
+        } else if (ieq(host, pat)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void at_modem_log(struct at_modem *m, const char *kind, const char *host, uint16_t port, bool allowed)
+{
+    struct at_log_entry *e = &m->log[m->log_count % AT_LOG_MAX];
+    e->ms = m->ops->millis ? m->ops->millis(m->ops->ctx) : 0;
+    copy_str(e->kind, sizeof e->kind, kind, strlen(kind));
+    copy_str(e->host, sizeof e->host, host, strlen(host));
+    e->port = port;
+    e->allowed = allowed;
+    m->log_count++;
+}
+
+const struct at_log_entry *at_modem_log_get(const struct at_modem *m, unsigned i)
+{
+    unsigned n = m->log_count < AT_LOG_MAX ? m->log_count : AT_LOG_MAX;
+    if (i >= n) return NULL;
+    return &m->log[(m->log_count - 1 - i) % AT_LOG_MAX];
+}
+
+/* Contrôle + journal d'une connexion sortante ; false = refusée. */
+static bool check_host(struct at_modem *m, const char *kind, const char *host, uint16_t port)
+{
+    bool ok_ = at_modem_host_allowed(&m->cfg, host);
+    at_modem_log(m, kind, host, port, ok_);
+    return ok_;
+}
+
 bool at_modem_port_is_tls(const struct at_config *cfg, uint16_t port)
 {
     for (int i = 0; i < AT_TLS_PORTS_MAX; i++)
@@ -204,6 +270,13 @@ void at_modem_init(struct at_modem *m, const struct at_modem_ops *ops,
         m->cfg.tnfs_host[AT_HOST_MAX] = 0;
         if (!m->cfg.tnfs_port) m->cfg.tnfs_port = 16384;
         if (m->cfg.tnfs_usb > 1) m->cfg.tnfs_usb = 0;
+        /* liste abîmée : entrée invalide effacée ; mode inconnu → filtrage actif
+           (en cas de doute, on refuse plutôt que d'ouvrir) */
+        for (int i = 0; i < AT_HOSTS_MAX; i++) {
+            m->cfg.hosts[i][AT_HOST_MAX] = 0;
+            if (m->cfg.hosts[i][0] && !at_modem_host_pattern_valid(m->cfg.hosts[i])) m->cfg.hosts[i][0] = 0;
+        }
+        if (m->cfg.hosts_enforce > 1) m->cfg.hosts_enforce = 1;
     } else if (cfg && (cfg->magic == AT_CONFIG_MAGIC_V2 || cfg->magic == AT_CONFIG_MAGIC_V1)) {
         /* migration v1/v2 → v3 : les champs ajoutés prennent leur valeur par
            défaut (tls_ports à zéro en v1, ap_pass) ; le reste est conservé */
@@ -213,6 +286,8 @@ void at_modem_init(struct at_modem *m, const struct at_modem_ops *ops,
         memset(m->cfg.tnfs_host, 0, sizeof m->cfg.tnfs_host);
         m->cfg.tnfs_port = 16384;
         m->cfg.tnfs_usb = 0;
+        m->cfg.hosts_enforce = 0;
+        memset(m->cfg.hosts, 0, sizeof m->cfg.hosts);
         m->cfg.magic = AT_CONFIG_MAGIC;
     } else {
         at_modem_config_defaults(&m->cfg);
@@ -292,6 +367,7 @@ static void do_dial(struct at_modem *m, const char *arg)
     }
     if (!m->ops->wifi_connected(m->ops->ctx)) { out(m, "\r\nNO CARRIER\r\n"); return; }
     if (m->ops->tcp_connected(m->ops->ctx)) { error(m); return; }
+    if (!check_host(m, "DIAL", host, (uint16_t)port)) { out(m, "\r\nNO CARRIER\r\n"); return; }
     int r = m->ops->tcp_connect(m->ops->ctx, host, (uint16_t)port,
                                 at_modem_port_is_tls(&m->cfg, (uint16_t)port));
     if (r != AT_NET_OK) { out(m, "\r\nNO CARRIER\r\n"); return; }
@@ -321,7 +397,7 @@ static bool hayes(struct at_modem *m, const char *cmd)
         else out(m, "\r\nNO CARRIER\r\n");
         return true;
     case 'A':
-        if (!m->link_udp && m->ops->tcp_accept(m->ops->ctx)) {
+        if (!m->link_udp && !m->cfg.hosts_enforce && m->ops->tcp_accept(m->ops->ctx)) {
             m->ring_pending = false;
             m->ring_count = 0;
             m->was_connected = true;
@@ -347,6 +423,13 @@ static bool hayes(struct at_modem *m, const char *cmd)
             const char *ap = m->ops->ap_setup_ssid(m->ops->ctx);
             if (ap) outf(m, "setup AP: \"%s\", password \"%s\", http://192.168.4.1/\r\n", ap, m->cfg.ap_pass);
             else out(m, "setup AP: off\r\n");
+        }
+        if (m->cfg.hosts_enforce) {
+            int n = 0;
+            for (int i = 0; i < AT_HOSTS_MAX; i++) n += m->cfg.hosts[i][0] != 0;
+            outf(m, "host filter: on, %d host(s) allowed (AT+NHOSTS?, AT+NLOG?)\r\n", n);
+        } else {
+            out(m, "host filter: off\r\n");
         }
         if (!m->cfg.tnfs_usb) out(m, "TNFS (USB port 2): disabled (AT$TNFSUSB=1)\r\n");
         else if (m->cfg.tnfs_host[0]) outf(m, "TNFS (USB port 2): %s:%u\r\n", m->cfg.tnfs_host, m->cfg.tnfs_port);
@@ -391,12 +474,34 @@ static bool hayes(struct at_modem *m, const char *cmd)
 
 /* ------------------------------------------------------- AT+ ESP8266 */
 
+/* US-T12 : avec le filtrage actif, un programme 6502 ne doit pas pouvoir
+   détourner un hôte autorisé (autre réseau Wi-Fi, DNS ou passerelle à lui) :
+   ces réglages ne changent alors que depuis la page du point d'accès, et le
+   mot de passe de celui-ci n'est plus modifiable en AT. */
+static bool network_locked(const struct at_modem *m, const char *cmd)
+{
+    static const char *const locked[] = {
+        "CWJAP=", "CWJAP_CUR=", "CWJAP_DEF=", "CWDHCP=", "CWDHCP_CUR=", "CWDHCP_DEF=",
+        "CIPSTA=", "CIPSTA_CUR=", "CIPSTA_DEF=", "CIPDNS=", "CIPDNS_CUR=", "CIPDNS_DEF=",
+        "APSETUPPWD=",      /* sinon : mot de passe connu d'un complice à portée */
+    };
+    if (!m->cfg.hosts_enforce) return false;
+    for (size_t i = 0; i < sizeof locked / sizeof locked[0]; i++)
+        if (starts(cmd, locked[i], NULL)) return true;
+    return false;
+}
+
 static void plus_command(struct at_modem *m, const char *cmd)
 {
     const char *p;
     long v;
     struct at_ip_info info;
 
+    if (network_locked(m, cmd)) {
+        out(m, "locked by host filter: use the setup page (AT+APSETUP=1)\r\n");
+        error(m);
+        return;
+    }
     if (!strcmp(cmd, "GMR")) {
         outf(m, "AT version:1.7.4.0(Neo6502drive)\r\nSDK version:%s\r\n"
                 "compile time:%s\r\n"
@@ -572,6 +677,7 @@ static void plus_command(struct at_modem *m, const char *cmd)
         else { error(m); return; }
         if (m->ops->tcp_connected(m->ops->ctx)) { out(m, "ALREADY CONNECTED\r\n"); error(m); return; }
         if (!m->ops->wifi_connected(m->ops->ctx)) { out(m, "no ip\r\n"); error(m); return; }
+        if (!check_host(m, type, host, (uint16_t)port)) { out(m, "host not allowed\r\n"); error(m); return; }
         if (udp) rx_flush(m);   /* aucun lien ouvert : reste éventuel d'un lien TCP */
         int r = udp ? m->ops->udp_connect(m->ops->ctx, host, (uint16_t)port)
                     : m->ops->tcp_connect(m->ops->ctx, host, (uint16_t)port, tls);
@@ -602,6 +708,7 @@ static void plus_command(struct at_modem *m, const char *cmd)
         long en, port = 23;
         if (!parse_int(&p, &en)) { error(m); return; }
         if (skip_comma(&p) && !parse_int(&p, &port)) { error(m); return; }
+        if (en && m->cfg.hosts_enforce) { out(m, "incoming calls disabled (host filter)\r\n"); error(m); return; }
         m->cfg.listen_port = en ? (uint16_t)port : 0;
         save(m);
         if (m->ops->tcp_listen(m->ops->ctx, m->cfg.listen_port) == AT_NET_OK) ok(m); else error(m);
@@ -617,6 +724,9 @@ static void plus_command(struct at_modem *m, const char *cmd)
             if (!parse_int(&p, &tz) || tz < -11 || tz > 13) { error(m); return; }
             if (skip_comma(&p) && !parse_quoted(&p, server, sizeof server)) { error(m); return; }
         }
+        if (strcmp(server, m->cfg.sntp_server) && !check_host(m, "SNTP", server, 123)) {
+            out(m, "host not allowed\r\n"); error(m); return;
+        }
         m->cfg.sntp_enable = en ? 1 : 0;
         m->cfg.sntp_tz = (int8_t)tz;
         strcpy(m->cfg.sntp_server, server);
@@ -630,9 +740,27 @@ static void plus_command(struct at_modem *m, const char *cmd)
     } else if (starts(cmd, "PING=", &p)) {
         char host[AT_HOST_MAX + 1];
         if (!parse_quoted(&p, host, sizeof host)) { error(m); return; }
+        if (!check_host(m, "PING", host, 0)) { out(m, "host not allowed\r\n"); error(m); return; }
         int ms = m->ops->ping ? m->ops->ping(m->ops->ctx, host) : -1;
         if (ms < 0) { out(m, "+timeout\r\n"); error(m); return; }
         outf(m, "+%d\r\n", ms);
+        ok(m);
+    } else if (!strcmp(cmd, "NHOSTS?")) {
+        /* US-T12 : lecture seule ; modification depuis la page du point d'accès */
+        outf(m, "+NHOSTS:%u", m->cfg.hosts_enforce);
+        for (int i = 0; i < AT_HOSTS_MAX; i++)
+            if (m->cfg.hosts[i][0]) outf(m, ",\"%s\"", m->cfg.hosts[i]);
+        out(m, "\r\n");
+        ok(m);
+    } else if (starts(cmd, "NHOSTS=", NULL)) {
+        out(m, "read-only: use the setup page (AT+APSETUP=1, http://192.168.4.1/)\r\n");
+        error(m);
+    } else if (!strcmp(cmd, "NLOG?")) {
+        uint32_t t = now(m);
+        const struct at_log_entry *e;
+        for (unsigned i = 0; (e = at_modem_log_get(m, i)); i++)
+            outf(m, "+NLOG:%lu,\"%s\",\"%s\",%u,%s\r\n", (unsigned long)((t - e->ms) / 1000),
+                 e->kind, e->host, e->port, e->allowed ? "allowed" : "refused");
         ok(m);
     } else if (!strcmp(cmd, "CIUPDATE")) {
         out(m, "no OTA on Pico W: flash a new UF2\r\n");
@@ -696,6 +824,7 @@ static void dollar_command(struct at_modem *m, const char *cmd)
     }
     while (*p == ' ') p++;
     if (!host[0] || strchr(host, ' ') || *p || port < 1 || port > 65535) { error(m); return; }
+    if (!check_host(m, "TNFS", host, (uint16_t)port)) { out(m, "host not allowed\r\n"); error(m); return; }
     strcpy(m->cfg.tnfs_host, host);
     m->cfg.tnfs_port = (uint16_t)port;
     save(m);
@@ -885,7 +1014,8 @@ void at_modem_poll(struct at_modem *m)
         m->ring_pending = false;
         m->ring_count++;
         out(m, "\r\nRING\r\n");
-        if (m->cfg.s0 && m->ring_count >= m->cfg.s0 && m->ops->tcp_accept(m->ops->ctx)) {
+        if (m->cfg.s0 && m->ring_count >= m->cfg.s0 && !m->cfg.hosts_enforce
+            && m->ops->tcp_accept(m->ops->ctx)) {
             m->ring_count = 0;
             m->was_connected = true;
             go_online(m);

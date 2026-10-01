@@ -74,11 +74,36 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `AT$TNFS="hôte",port` / `=hôte:port` / `=hôte` / `=0` / `?` | serveur TNFS du second port USB (port 16384 par défaut, persistant) ; `$TNFS:"hôte",port` ; `=0` efface ; commande commune avec PicoWiFiModemUSB |
 | `AT$TNFSUSB=1` / `=0` / `?` | second port USB TNFS présent / absent (**défaut : absent**), persistant, pris en compte au prochain démarrage (`AT+RST`) |
 | `AT&W` | `OK` (la configuration est déjà enregistrée à chaque commande) |
+| `AT+NHOSTS?` | `+NHOSTS:<actif>,"hôte1",…` : filtrage des hôtes ; **lecture seule** (`AT+NHOSTS=…` → `ERROR`, modifier depuis la page `/hosts`) |
+| `AT+NLOG?` | 16 dernières tentatives : `+NLOG:<âge s>,"TCP|SSL|UDP|DIAL|PING|TNFS|SNTP","hôte",port,allowed|refused` |
 | `AT+APSETUPPWD="…"` / `?` | mot de passe du point d'accès (8 à 63 caractères ASCII imprimables, persistant) ; défaut `neo6502wifi` |
 
 Non pris en charge (répond `ERROR`) : `CIPMUX=1`, forme UDP à 5 paramètres (port local, mode), `ATO`/`ATA` sur un lien UDP (`NO CARRIER`), mode point d'accès,
 TLS 1.3, certificat client, mode transparent ESP (`CIPMODE=1` ; utiliser
 `ATDT` à la place — `ATDT` fait aussi du TLS vers un port de `AT+TLSPORT`).
+
+## Hôtes autorisés (filtrage des connexions)
+
+Pour qu'un programme `.neo` malveillant ne puisse pas envoyer le contenu du stockage
+vers un serveur de son choix, le modem peut n'autoriser qu'une liste d'hôtes
+(8 au plus : nom exact, `*.domaine` pour ses sous-domaines, ou adresse IP).
+
+- **Modifiable seulement depuis la page web** du point d'accès (`AT+APSETUP=1`, puis
+  http://192.168.4.1/hosts) : un programme 6502, maître du port série, ne peut pas
+  élargir sa propre liste. En AT : lecture seule (`AT+NHOSTS?`) et journal (`AT+NLOG?`).
+- **Désactivé par défaut** (netsetup, prophet, NeoNavigator inchangés).
+- Filtrage actif : `CIPSTART` (TCP, SSL, UDP), `ATDT`, `AT$TNFS` et le port TNFS,
+  `AT+PING`, un nouveau serveur `AT+CIPSNTPCFG` sont refusés (`host not allowed` /
+  `NO CARRIER`) pour un hôte absent de la liste — le nom est contrôlé **avant** toute
+  requête DNS (un nom peut à lui seul transporter des données) ; les **appels entrants**
+  sont refusés (`CIPSERVER=1`, `ATA`, réponse automatique) ; les réglages qui permettraient
+  de détourner un hôte autorisé sont **verrouillés en AT** : réseau Wi-Fi (`CWJAP`), DNS
+  (`CIPDNS`), IP/passerelle (`CIPSTA`, `CWDHCP`) et mot de passe du point d'accès
+  (`APSETUPPWD`) — la page web reste utilisable pour le Wi-Fi.
+- Une connexion déjà ouverte n'est pas coupée quand la liste change.
+
+Limite : la page est protégée par le mot de passe du point d'accès, **public par
+défaut** ; changez-le (`AT+APSETUPPWD`) **avant** d'activer le filtrage.
 
 ## Second port USB : TNFS
 

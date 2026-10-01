@@ -40,6 +40,8 @@ enum at_net_result {
 };
 
 #define AT_TLS_PORTS_MAX 4
+#define AT_HOSTS_MAX     8     /* US-T12 : hôtes autorisés (page web seulement) */
+#define AT_LOG_MAX       16    /* US-T12 : journal des connexions              */
 
 /* Informations IP (chaînes déjà formatées, "0.0.0.0" si absent). */
 struct at_ip_info {
@@ -76,6 +78,10 @@ struct at_config {
     char     tnfs_host[AT_HOST_MAX + 1];  /* AT$TNFS : serveur du port USB TNFS ("" = aucun) */
     uint16_t tnfs_port;
     uint8_t  tnfs_usb;      /* AT$TNFSUSB : 1 = second port USB TNFS (au démarrage) */
+    /* US-T12 : filtrage des hôtes. Modifiable seulement depuis la page web du
+       point d'accès (un programme 6502 ne peut pas élargir sa propre liste). */
+    uint8_t  hosts_enforce;
+    char     hosts[AT_HOSTS_MAX][AT_HOST_MAX + 1];  /* "nom", "*.domaine" ou IP */
 };
 
 #define AT_CONFIG_MAGIC    0x4E574D33u /* 'NWM3' */
@@ -134,6 +140,20 @@ struct at_modem_ops {
 /* Vrai si le port est dans la liste AT+TLSPORT. */
 bool at_modem_port_is_tls(const struct at_config *cfg, uint16_t port);
 
+/* US-T12 : vrai si le filtrage est inactif ou si host est dans la liste
+   (nom exact sans casse, ou "*.domaine" pour ses sous-domaines). */
+bool at_modem_host_allowed(const struct at_config *cfg, const char *host);
+/* Entrée de liste valide : 1 à 64 caractères [A-Za-z0-9.-], "*." en tête admis. */
+bool at_modem_host_pattern_valid(const char *pattern);
+
+struct at_log_entry {
+    uint32_t ms;               /* instant (millis) de la tentative */
+    char     kind[6];          /* "TCP", "SSL", "UDP", "DIAL", "PING", "TNFS", "SNTP", "IN" */
+    char     host[AT_HOST_MAX + 1];
+    uint16_t port;
+    bool     allowed;
+};
+
 enum at_mode {
     AT_MODE_COMMAND = 0,   /* interprète les lignes AT                       */
     AT_MODE_CIPSEND,       /* collecte n octets après AT+CIPSEND=n           */
@@ -170,6 +190,10 @@ struct at_modem {
     volatile bool remote_closed;
     bool     was_connected;
     bool     link_udp;         /* lien ouvert en UDP : tampon en datagrammes */
+
+    /* US-T12 : dernières tentatives de connexion (anneau) */
+    struct at_log_entry log[AT_LOG_MAX];
+    unsigned log_count;
 };
 
 /* Initialisation ; cfg peut être NULL (valeurs par défaut). */
@@ -191,5 +215,10 @@ size_t at_modem_rx_push(struct at_modem *m, const uint8_t *data, size_t len);
 size_t at_modem_rx_push_dgram(struct at_modem *m, const uint8_t *data, size_t len);
 void   at_modem_remote_closed(struct at_modem *m);
 void   at_modem_ring(struct at_modem *m);
+
+/* US-T12 : consigne une tentative (aussi utilisé par la plateforme : TNFS). */
+void   at_modem_log(struct at_modem *m, const char *kind, const char *host, uint16_t port, bool allowed);
+/* i-ème entrée, de la plus récente (0) à la plus ancienne ; NULL au-delà. */
+const struct at_log_entry *at_modem_log_get(const struct at_modem *m, unsigned i);
 
 #endif

@@ -44,8 +44,9 @@ static bool auto_checked;               /* règle des 60 s déjà appliquée    
 /* état partagé avec les rappels lwIP (modifié sous cyw43_arch_lwip_begin) */
 static struct web_ap aps[WEB_AP_MAX];
 static int n_ap;
-static volatile bool scanning, scan_pending, form_pending;
+static volatile bool scanning, scan_pending, form_pending, hosts_pending;
 static struct web_form form;
+static struct web_hosts hosts_form;     /* US-T12 : liste reçue de la page */
 static enum web_join join_state;
 static char join_ssid[33];
 static uint32_t join_t0;
@@ -108,6 +109,12 @@ static void status_snapshot(struct web_status *st, char *sta_ip, size_t sta_ip_s
     st->scanning = scanning || scan_pending;
     st->n_ap = n_ap;
     st->ap = aps;
+    st->hosts_enforce = m->cfg.hosts_enforce;
+    st->hosts = (const char (*)[AT_HOST_MAX + 1])m->cfg.hosts;
+    st->n_log = 0;
+    for (const struct at_log_entry *e; st->n_log < AT_LOG_MAX && (e = at_modem_log_get(m, (unsigned)st->n_log)); )
+        st->log[st->n_log++] = e;
+    st->now_ms = now_ms();
 }
 
 static err_t on_http_recv(void *arg, struct tcp_pcb *p, struct pbuf *buf, err_t err)
@@ -129,8 +136,9 @@ static err_t on_http_recv(void *arg, struct tcp_pcb *p, struct pbuf *buf, err_t 
     char *resp = malloc(HTTP_RESP_MAX);
     if (!resp) { conn_close(c); return ERR_OK; }
     struct web_form f;
+    static struct web_hosts h;          /* rappels lwIP non réentrants */
     size_t len = 0;
-    enum web_result r = web_setup_handle(c->req, c->req_len, &st, &f, resp, HTTP_RESP_MAX, &len);
+    enum web_result r = web_setup_handle(c->req, c->req_len, &st, &f, &h, resp, HTTP_RESP_MAX, &len);
     if (r == WEB_INCOMPLETE) {
         free(resp);
         if (c->req_len == HTTP_REQ_MAX) conn_close(c);   /* requête trop grande */
@@ -143,6 +151,9 @@ static err_t on_http_recv(void *arg, struct tcp_pcb *p, struct pbuf *buf, err_t 
         form_pending = true;
     } else if (r == WEB_REPLY_RESCAN) {
         scan_pending = true;
+    } else if (r == WEB_REPLY_HOSTS) {
+        hosts_form = h;
+        hosts_pending = true;
     }
     c->resp = resp;
     c->resp_len = len;
@@ -358,6 +369,21 @@ void ap_pico_poll(void)
         net_pico_join_saved();
     }
     poll_join();
+
+    if (hosts_pending) {
+        /* US-T12 : seul chemin d'écriture de la liste (la commande AT est en lecture seule) */
+        cyw43_arch_lwip_begin();
+        struct web_hosts h = hosts_form;
+        hosts_pending = false;
+        cyw43_arch_lwip_end();
+        m->cfg.hosts_enforce = (uint8_t)(h.enforce ? 1 : 0);
+        memcpy(m->cfg.hosts, h.hosts, sizeof m->cfg.hosts);
+        if (m->cfg.hosts_enforce && m->cfg.listen_port) {
+            m->cfg.listen_port = 0;                     /* appels entrants refusés */
+            (net_pico_ops.tcp_listen)(NULL, 0);         /* parenthèses : macro lwIP tcp_listen */
+        }
+        config_flash_save(NULL, &m->cfg);
+    }
 
     /* recherche des réseaux sans bloquer les commandes AT */
     if (scan_pending && !scanning && net_pico_scan_start()) {

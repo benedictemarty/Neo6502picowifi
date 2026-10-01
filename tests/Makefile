@@ -32,8 +32,8 @@ test_tls_date: test_tls_date.c ../src/tls_date.c ../src/tls_date.h
 test_dhcp_server: test_dhcp_server.c ../src/dhcp_server.c ../src/dhcp_server.h ../src/dns_catchall.c ../src/dns_catchall.h
 	$(CC) $(CFLAGS) -o $@ test_dhcp_server.c ../src/dhcp_server.c ../src/dns_catchall.c
 
-test_web_setup: test_web_setup.c ../src/web_setup.c ../src/web_setup.h
-	$(CC) $(CFLAGS) -o $@ test_web_setup.c ../src/web_setup.c
+test_web_setup: test_web_setup.c ../src/web_setup.c ../src/web_setup.h ../src/at_modem.c ../src/at_modem.h
+	$(CC) $(CFLAGS) -o $@ test_web_setup.c ../src/web_setup.c ../src/at_modem.c
 
 test_tnfs_link: test_tnfs_link.c ../src/tnfs_link.c ../src/tnfs_link.h
 	$(CC) $(CFLAGS) -o $@ test_tnfs_link.c ../src/tnfs_link.c

@@ -12,6 +12,7 @@ static int failures, checks;
 static struct web_ap aps[3] = { { "Livebox-1234", -50, 3 }, { "<script>\"x\"&", -70, 0 }, { "Free WiFi", -80, 0 } };
 static struct web_status st;
 static struct web_form form;
+static struct web_hosts hosts;
 static char resp[6144];
 static size_t len;
 
@@ -19,9 +20,18 @@ static enum web_result req(const char *r)
 {
     memset(resp, 0, sizeof resp);
     memset(&form, 0, sizeof form);
-    enum web_result x = web_setup_handle(r, strlen(r), &st, &form, resp, sizeof resp - 1, &len);
+    memset(&hosts, 0xaa, sizeof hosts);
+    enum web_result x = web_setup_handle(r, strlen(r), &st, &form, &hosts, resp, sizeof resp - 1, &len);
     resp[len] = 0;
     return x;
+}
+
+static enum web_result post_to(const char *path, const char *body)
+{
+    char r[2048];
+    snprintf(r, sizeof r, "POST %s HTTP/1.1\r\nHost: 192.168.4.1\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+                          "Content-Length: %u\r\n\r\n%s", path, (unsigned)strlen(body), body);
+    return req(r);
 }
 
 static enum web_result post(const char *body)
@@ -139,9 +149,10 @@ static void test_overflow(void)
     reset();
     char small[256];
     struct web_form f;
+    struct web_hosts h;
     size_t n;
     const char *r = "GET / HTTP/1.1\r\n\r\n";
-    CHECK(web_setup_handle(r, strlen(r), &st, &f, small, sizeof small, &n) == WEB_REPLY);
+    CHECK(web_setup_handle(r, strlen(r), &st, &f, &h, small, sizeof small, &n) == WEB_REPLY);
     CHECK(n > 0 && n < sizeof small && !strncmp(small, "HTTP/1.1 500", 12));
     /* liste complète de réseaux à SSID de 32 caractères spéciaux : tient dans 6 Ko */
     static struct web_ap many[WEB_AP_MAX];
@@ -153,12 +164,70 @@ static void test_overflow(void)
     CHECK_IN("<p>\xe2\x80\xa6</p>");
 }
 
+/* US-T12 : hôtes autorisés et journal */
+static char cfg_hosts[AT_HOSTS_MAX][AT_HOST_MAX + 1];
+static struct at_log_entry logs[AT_LOG_MAX];
+
+static void test_hosts(void)
+{
+    reset();
+    memset(cfg_hosts, 0, sizeof cfg_hosts);
+    strcpy(cfg_hosts[0], "tnfs.example");
+    strcpy(cfg_hosts[3], "*.neonav.fr");
+    st.hosts = (const char (*)[AT_HOST_MAX + 1])cfg_hosts;
+    st.hosts_enforce = 1;
+    st.now_ms = 100000;
+    logs[0] = (struct at_log_entry){ 99000, "TCP", "tnfs.example", 16384, true };
+    logs[1] = (struct at_log_entry){ 40000, "PING", "<b>evil", 0, false };
+    st.log[0] = &logs[0]; st.log[1] = &logs[1]; st.n_log = 2;
+
+    req("GET / HTTP/1.1\r\n\r\n"); CHECK_IN("<a href=/hosts>");
+    CHECK(req("GET /hosts HTTP/1.1\r\nHost: 192.168.4.1\r\n\r\n") == WEB_REPLY);
+    CHECK_IN("200 OK"); CHECK_IN("value=1 checked>");
+    CHECK_IN("<textarea name=hosts rows=8>tnfs.example\n*.neonav.fr\n</textarea>");
+    CHECK_IN("<td>TCP</td><td>tnfs.example:16384</td><td class=o>autoris");
+    CHECK_IN("il y a 1 s"); CHECK_IN("il y a 60 s");
+    CHECK_IN("&lt;b&gt;evil</td><td class=e>refus");          /* nom journalisé échappé */
+    CHECK_NOT_IN("<b>evil");
+    st.hosts_enforce = 0; st.n_log = 0;
+    req("GET /hosts HTTP/1.1\r\n\r\n"); CHECK_NOT_IN("checked"); CHECK_IN("Aucune.");
+
+    /* enregistrement : lignes CRLF, espaces, lignes vides ignorées */
+    CHECK(post_to("/hosts", "enforce=1&hosts=+tnfs.example+%0D%0A%0D%0A*.neonav.fr%0D%0A192.168.1.10") == WEB_REPLY_HOSTS);
+    CHECK(hosts.enforce == 1 && !strcmp(hosts.hosts[0], "tnfs.example") && !strcmp(hosts.hosts[1], "*.neonav.fr")
+          && !strcmp(hosts.hosts[2], "192.168.1.10") && hosts.hosts[3][0] == 0 && hosts.hosts[7][0] == 0);
+    CHECK_IN("Liste enregistr"); CHECK_IN("checked");
+    CHECK_IN(">tnfs.example\n*.neonav.fr\n192.168.1.10\n</textarea>");
+    /* case décochée : filtrage désactivé, liste gardée */
+    CHECK(post_to("/hosts", "hosts=a.fr") == WEB_REPLY_HOSTS && hosts.enforce == 0 && !strcmp(hosts.hosts[0], "a.fr"));
+    CHECK(post_to("/hosts", "enforce=1&hosts=") == WEB_REPLY_HOSTS && hosts.enforce == 1 && hosts.hosts[0][0] == 0);
+    /* erreurs : entrée invalide, trop d'entrées → rien n'est enregistré */
+    CHECK(post_to("/hosts", "enforce=1&hosts=bad%20host") == WEB_REPLY); CHECK_IN("400"); CHECK_IN("invalide");
+    CHECK(post_to("/hosts", "hosts=*evil.fr") == WEB_REPLY); CHECK_IN("invalide");
+    CHECK(post_to("/hosts", "hosts=a%0Ab%0Ac%0Ad%0Ae%0Af%0Ag%0Ah%0Ai") == WEB_REPLY); CHECK_IN("8 h");
+    CHECK(post_to("/hosts", "hosts=a%0Ab%0Ac%0Ad%0Ae%0Af%0Ag%0Ah") == WEB_REPLY_HOSTS && !strcmp(hosts.hosts[7], "h"));
+    /* autre hôte HTTP : redirection, pas d'enregistrement */
+    CHECK(req("POST /hosts HTTP/1.1\r\nHost: evil.example\r\nContent-Length: 9\r\n\r\nenforce=0") == WEB_REPLY);
+    CHECK_IN("302 Found");
+    /* journal complet de noms à échapper : page complète */
+    static struct at_log_entry big[AT_LOG_MAX];
+    for (int i = 0; i < AT_LOG_MAX; i++) {
+        big[i] = (struct at_log_entry){ 0, "TCP", "", 65535, false };
+        memset(big[i].host, '&', AT_HOST_MAX); big[i].host[AT_HOST_MAX] = 0;
+        st.log[i] = &big[i];
+    }
+    st.n_log = AT_LOG_MAX;
+    for (int i = 0; i < AT_HOSTS_MAX; i++) { memset(cfg_hosts[i], 'x', AT_HOST_MAX); cfg_hosts[i][AT_HOST_MAX] = 0; }
+    req("GET /hosts HTTP/1.1\r\n\r\n"); CHECK_IN("200 OK"); CHECK_IN("</html>");
+}
+
 int main(void)
 {
     test_page();
     test_captive();
     test_form();
     test_overflow();
+    test_hosts();
     printf("%d vérifications, %d échec(s)\n", checks, failures);
     return failures ? 1 : 0;
 }

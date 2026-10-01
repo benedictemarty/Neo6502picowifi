@@ -9,6 +9,7 @@
 #include <string.h>
 
 #define BODY_MAX 1024          /* corps de POST accepté */
+#define HOSTS_TEXT_MAX 900     /* champ hosts décodé : 8 × 64 + séparateurs, avec marge */
 
 /* ------------------------------------------------------------ sortie */
 
@@ -197,7 +198,75 @@ static void page_body(const struct web_status *st, const char *error, struct out
              "<label>Autre r\xc3\xa9seau (nom) : <input type=text name=ssid_manual maxlength=32></label>"
              "<label>Mot de passe : <input type=password name=pass maxlength=63></label>"
              "<button type=submit>Enregistrer et se connecter</button></form>");
+    puts_(o, "<p><a href=/hosts>H\xc3\xb4tes autoris\xc3\xa9s et journal des connexions</a></p>");
     printf_(o, "<p><small>Modem %s</small></p></body></html>", st->version);
+}
+
+/* US-T12 : liste des hôtes autorisés et journal */
+static void hosts_body(const struct web_status *st, const char *error, bool saved, struct out *o)
+{
+    puts_(o, "<!doctype html><html lang=fr><head><meta charset=utf-8>"
+             "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
+             "<title>H\xc3\xb4tes autoris\xc3\xa9s</title><style>"
+             "body{font-family:sans-serif;max-width:30em;margin:1em auto;padding:0 1em}"
+             "label{display:block;margin:.5em 0}textarea{width:100%;box-sizing:border-box}"
+             "button{padding:.5em 1em;margin-top:.6em}.e{color:#b00}.o{color:#070}"
+             "td{padding:0 .4em 0 0;vertical-align:top}"
+             "</style></head><body><h1>H\xc3\xb4tes autoris\xc3\xa9s</h1>");
+    if (saved) puts_(o, "<p class=o>Liste enregistr\xc3\xa9" "e.</p>");
+    if (error) { puts_(o, "<p class=e>"); put_html(o, error); puts_(o, "</p>"); }
+    puts_(o, "<form method=post action=/hosts><label><input type=checkbox name=enforce value=1");
+    if (st->hosts_enforce) puts_(o, " checked");
+    puts_(o, "> Filtrer : seuls ces h\xc3\xb4tes sont joignables (CIPSTART, ATDT, TNFS, PING, SNTP) "
+             "et les appels entrants sont refus\xc3\xa9s</label>"
+             "<label>Un h\xc3\xb4te par ligne : nom, <code>*.domaine</code> (ses sous-domaines) "
+             "ou adresse IP ; 8 au plus.<textarea name=hosts rows=8>");
+    for (int i = 0; st->hosts && i < AT_HOSTS_MAX; i++)
+        if (st->hosts[i][0]) { put_html(o, st->hosts[i]); puts_(o, "\n"); }
+    puts_(o, "</textarea></label><button type=submit>Enregistrer la liste</button></form>"
+             "<h2>Derni\xc3\xa8res connexions</h2>");
+    if (st->n_log == 0) puts_(o, "<p>Aucune.</p>");
+    else puts_(o, "<table>");
+    for (int i = 0; i < st->n_log; i++) {
+        if (o->cap - o->n < 800) { puts_(o, "<tr><td>\xe2\x80\xa6</td></tr>"); break; }
+        const struct at_log_entry *e = st->log[i];
+        puts_(o, "<tr><td>"); put_html(o, e->kind); puts_(o, "</td><td>"); put_html(o, e->host);
+        if (e->port) printf_(o, ":%u", e->port);
+        printf_(o, "</td><td class=%s>%s</td><td>il y a %lu s</td></tr>", e->allowed ? "o" : "e",
+                e->allowed ? "autoris\xc3\xa9" : "refus\xc3\xa9",
+                (unsigned long)((st->now_ms - e->ms) / 1000));
+    }
+    if (st->n_log) puts_(o, "</table>");
+    puts_(o, "<p><a href=/>Retour</a></p></body></html>");
+}
+
+/* Analyse du formulaire /hosts ; renvoie un message d'erreur ou NULL. */
+static const char *parse_hosts(const char *body, size_t n, struct web_hosts *h)
+{
+    static char text[HOSTS_TEXT_MAX];
+    char flag[4];
+    memset(h, 0, sizeof *h);
+    h->enforce = form_field(body, n, "enforce", flag, sizeof flag) == 1 && !strcmp(flag, "1");
+    if (form_field(body, n, "hosts", text, sizeof text) < 0) return "Liste trop longue.";
+    int count = 0;
+    for (char *line = text; *line; ) {
+        char *end = line + strcspn(line, "\r\n");
+        char save = *end;
+        *end = 0;
+        while (*line == ' ' || *line == '\t') line++;
+        size_t l = strlen(line);
+        while (l && (line[l - 1] == ' ' || line[l - 1] == '\t')) line[--l] = 0;
+        if (l) {
+            if (count == AT_HOSTS_MAX) return "8 h\xc3\xb4tes au plus.";
+            if (!at_modem_host_pattern_valid(line))
+                return "Entr\xc3\xa9" "e invalide : lettres, chiffres, points, tirets ; *.domaine admis en t\xc3\xaa" "te.";
+            strcpy(h->hosts[count++], line);
+        }
+        *end = save;
+        line = end;
+        while (*line == '\r' || *line == '\n') line++;
+    }
+    return NULL;
 }
 
 /* Page complète : le corps est construit derrière une réserve, puis l'en-tête
@@ -219,6 +288,23 @@ static void page(const struct web_status *st, const char *status_line, const cha
     o->n = (size_t)k + body.n;
 }
 
+static void hosts_page(const struct web_status *st, const char *status_line, const char *error,
+                       bool saved, struct out *o)
+{
+    enum { RESERVE = 192 };
+    if (o->cap < RESERVE) { o->overflow = true; return; }
+    struct out body = { o->b + RESERVE, o->cap - RESERVE, 0, false };
+    hosts_body(st, error, saved, &body);
+    if (body.overflow) { o->overflow = true; return; }
+    char hdr[RESERVE];
+    int k = snprintf(hdr, sizeof hdr, "HTTP/1.1 %s\r\nContent-Type: text/html; charset=utf-8\r\n"
+                     "Cache-Control: no-store\r\nContent-Length: %u\r\nConnection: close\r\n\r\n",
+                     status_line, (unsigned)body.n);
+    memmove(o->b + k, body.b, body.n);
+    memcpy(o->b, hdr, (size_t)k);
+    o->n = (size_t)k + body.n;
+}
+
 static void simple(const char *status_line, struct out *o)
 {
     printf_(o, "HTTP/1.1 %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status_line);
@@ -227,8 +313,8 @@ static void simple(const char *status_line, struct out *o)
 /* ----------------------------------------------------------- entrée */
 
 enum web_result web_setup_handle(const char *req, size_t len, const struct web_status *st,
-                                 struct web_form *form, char *resp, size_t cap,
-                                 size_t *resp_len)
+                                 struct web_form *form, struct web_hosts *hosts,
+                                 char *resp, size_t cap, size_t *resp_len)
 {
     struct out o = { resp, cap, 0, false };
     enum web_result r = WEB_REPLY;
@@ -257,7 +343,10 @@ enum web_result web_setup_handle(const char *req, size_t len, const struct web_s
     } else if (IS("GET", "/scan")) {
         redirect(st, &o);
         r = WEB_REPLY_RESCAN;
-    } else if (IS("POST", "/save")) {
+    } else if (IS("GET", "/hosts")) {
+        hosts_page(st, "200 OK", NULL, false, &o);
+    } else if (IS("POST", "/save") || IS("POST", "/hosts")) {
+        bool is_hosts = path[1] == 'h';
         char cl[16] = "";
         long n = header(eol + 2, hend + 2, "Content-Length", cl, sizeof cl) ? strtol(cl, NULL, 10) : -1;
         const char *body = hend + 4;
@@ -266,6 +355,15 @@ enum web_result web_setup_handle(const char *req, size_t len, const struct web_s
             simple(n < 0 ? "411 Length Required" : "413 Payload Too Large", &o);
         } else if (have < (size_t)n) {
             return WEB_INCOMPLETE;
+        } else if (is_hosts) {
+            const char *error = parse_hosts(body, (size_t)n, hosts);
+            struct web_status next = *st;
+            if (!error) {
+                next.hosts_enforce = hosts->enforce;
+                next.hosts = (const char (*)[AT_HOST_MAX + 1])hosts->hosts;
+                r = WEB_REPLY_HOSTS;
+            }
+            hosts_page(&next, error ? "400 Bad Request" : "200 OK", error, !error, &o);
         } else {
             char manual[34] = "", choice[34] = "", pass[66] = "";
             const char *error = NULL;

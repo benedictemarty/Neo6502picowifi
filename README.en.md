@@ -76,11 +76,35 @@ Wi-Fi modem for the Neo6502 (stories US-T1 and US-T2 in `docs/BACKLOG.md`).
 | `AT$TNFS="host",port` / `=host:port` / `=host` / `=0` / `?` | TNFS server of the second USB port (port 16384 by default, persistent); `$TNFS:"host",port`; `=0` clears; same command as PicoWiFiModemUSB |
 | `AT$TNFSUSB=1` / `=0` / `?` | second TNFS USB port present / absent (**default: absent**), persistent, applied at the next boot (`AT+RST`) |
 | `AT&W` | `OK` (the configuration is already saved by every command) |
+| `AT+NHOSTS?` | `+NHOSTS:<on>,"host1",…`: host filter; **read-only** (`AT+NHOSTS=…` → `ERROR`, change it from the `/hosts` page) |
+| `AT+NLOG?` | last 16 attempts: `+NLOG:<age s>,"TCP|SSL|UDP|DIAL|PING|TNFS|SNTP","host",port,allowed|refused` |
 | `AT+APSETUPPWD="…"` / `?` | access point password (8 to 63 printable ASCII characters, persistent); default `neo6502wifi` |
 
 Not supported (answers `ERROR`): `CIPMUX=1`, 5-parameter UDP form (local port, mode), `ATO`/`ATA` on a UDP link (`NO CARRIER`), access-point mode, TLS 1.3,
 client certificate, ESP transparent mode (`CIPMODE=1`; use `ATDT` instead —
 `ATDT` also does TLS towards a port listed in `AT+TLSPORT`).
+
+## Allowed hosts (connection filter)
+
+So that a malicious `.neo` program cannot send the storage contents to a server of its
+choice, the modem can allow only a list of hosts (8 at most: exact name, `*.domain` for
+its subdomains, or IP address).
+
+- **Only changeable from the web page** of the access point (`AT+APSETUP=1`, then
+  http://192.168.4.1/hosts): a 6502 program, which owns the serial port, cannot widen
+  its own list. Over AT: read-only (`AT+NHOSTS?`) and log (`AT+NLOG?`).
+- **Disabled by default** (netsetup, prophet, NeoNavigator unchanged).
+- When active: `CIPSTART` (TCP, SSL, UDP), `ATDT`, `AT$TNFS` and the TNFS port,
+  `AT+PING`, a new `AT+CIPSNTPCFG` server are refused (`host not allowed` / `NO CARRIER`)
+  for a host not in the list — the name is checked **before** any DNS query (a name alone
+  can carry data); **incoming calls** are refused (`CIPSERVER=1`, `ATA`, auto answer);
+  settings that would allow hijacking an allowed host are **locked over AT**: Wi-Fi
+  network (`CWJAP`), DNS (`CIPDNS`), IP/gateway (`CIPSTA`, `CWDHCP`) and the access point
+  password (`APSETUPPWD`) — the web page still works for Wi-Fi.
+- A connection already open is not cut when the list changes.
+
+Limit: the page is protected by the access point password, **public by default**;
+change it (`AT+APSETUPPWD`) **before** turning the filter on.
 
 ## Second USB port: TNFS
 
