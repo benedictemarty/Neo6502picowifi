@@ -40,6 +40,8 @@ add_executable(picow_modem
     src/dhcp_server.c
     src/dns_catchall.c
     src/web_setup.c
+    src/tnfs_link.c
+    src/tnfs_pico.c
     ${CMAKE_CURRENT_BINARY_DIR}/roots_gen.c
 )
 # identifiant de build (git describe), recalculé à chaque compilation

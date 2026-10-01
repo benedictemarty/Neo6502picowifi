@@ -6,7 +6,8 @@
  *    F-13 (hôte CDC) du firmware Neo6502 ;
  *  - UART0 GP0 (TX) / GP1 (RX), 115200 8N1 : connecteur UEXT du Neo6502,
  *    comme le MOD-WIFI-ESP8266 (netsetup.pas : NeoSetupUART(115200)).
- * Les réponses sont émises sur les deux transports. La LED de la carte
+ * Les réponses sont émises sur les deux transports. Un second port USB
+ * (CDC 1) est réservé à TNFS (tnfs_pico.c). La LED de la carte
  * s'allume quand le Wi-Fi est associé, clignote pendant une connexion TCP.
  */
 #include "reset_cause.h"
@@ -22,6 +23,7 @@
 
 #include "at_modem.h"
 #include "net_pico.h"
+#include "tnfs_pico.h"
 
 #define UART_ID     uart0
 #define UART_TX_PIN 0
@@ -101,6 +103,7 @@ int main(void)
     uart_set_irq_enables(UART_ID, true, false);
 
     tusb_init();
+    tnfs_pico_init();
 
     struct at_config cfg;
     config_flash_load(&cfg);
@@ -156,6 +159,7 @@ int main(void)
             n = tud_cdc_read(buf, sizeof buf);
             if (n) at_modem_input(&modem, buf, n);
         }
+        tnfs_pico_poll();                       /* second port USB : TNFS */
         net_pico_stage(2);
         at_modem_poll(&modem);
         net_pico_stage(3);

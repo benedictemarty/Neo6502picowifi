@@ -73,11 +73,33 @@ Wi-Fi modem for the Neo6502 (stories US-T1 and US-T2 in `docs/BACKLOG.md`).
 | `ATI` | identity (`modem X.Y.Z`), `build:` line (`git describe`: `vX.Y.Z` for a release, `vX.Y.Z-N-gSHA[-dirty]` otherwise), saved SSID, last reset cause (`power-on`, `AT+RST`, `AT+BOOTSEL (UF2 flash)`, `reboot (bootloader or debugger)`, `watchdog timeout, stage N`, `lwip assert: …`), `TLS:` line (stack, number of roots, root used by the last handshake (`last root:`), newlib heap (`heap:` used, peak, max), time, duration and cipher suite of the last handshake, `resumed`, verification flags, last lwIP/mbedTLS messages), `TLS ports:` |
 | `AT+BOOTSEL` | `OK` then switch to UF2 mode (`RPI-RP2`) without touching the button — specific to this firmware |
 | `AT+APSETUP=1` / `=0` / `?` | opens / closes the setup access point; `+APSETUP:1,"Neo6502-modem-XXXX"` or `+APSETUP:0` (see below) |
+| `AT$TNFS="host",port` / `=host:port` / `=host` / `=0` / `?` | TNFS server of the second USB port (port 16384 by default, persistent); `$TNFS:"host",port`; `=0` clears; same command as PicoWiFiModemUSB |
+| `AT&W` | `OK` (the configuration is already saved by every command) |
 | `AT+APSETUPPWD="…"` / `?` | access point password (8 to 63 printable ASCII characters, persistent); default `neo6502wifi` |
 
 Not supported (answers `ERROR`): `CIPMUX=1`, 5-parameter UDP form (local port, mode), `ATO`/`ATA` on a UDP link (`NO CARRIER`), access-point mode, TLS 1.3,
 client certificate, ESP transparent mode (`CIPMODE=1`; use `ATDT` instead —
 `ATDT` also does TLS towards a port listed in `AT+TLSPORT`).
+
+## Second USB port: TNFS
+
+The modem is a composite USB device with **two serial ports** (CDC-ACM, VID:PID
+`2E8A:000A`, product "Pico W Wi-Fi modem", manufacturer "Neo6502drive"):
+
+| Interfaces | Name | Role | Linux |
+|---|---|---|---|
+| 0-1 | `Modem AT` | AT/Hayes modem (unchanged) | `/dev/ttyACM0` |
+| 2-3 | `TNFS` | TNFS relay (UDP) | `/dev/ttyACM1` |
+
+On the TNFS port, in both directions, one frame = **2-byte little-endian length**
+followed by the **datagram** (1 to 1472 bytes); an invalid length flushes the input
+buffer (resynchronisation). Each frame goes out as one UDP datagram to the `AT$TNFS`
+server (DNS resolved without blocking on the first datagram); each reply comes back as
+one frame. This UDP link is **independent from the AT link**: a Minitel/Telnet session
+(`ATDT`, `CIPSTART`) and TNFS work at the same time. Without Wi-Fi, without a server,
+during DNS resolution, or with the TNFS port closed (DTR): nothing is sent back, the TNFS
+client handles its own timeouts. Format agreed with reload-emulator and Neo6502TeleStrat
+(reload's `src/devices/neo_tnfs.h` client). No TNFS over the UART.
 
 ## Setting up Wi-Fi from a phone
 
@@ -173,6 +195,7 @@ the value in `netsetup.pas`).
 ```
 make -C tests      # modem core (test_at_modem) + TLS dates (test_tls_date) on the PC, gcc + ASan/UBSan
                    # + setup access point: DHCP and captive DNS (test_dhcp_server), page (test_web_setup)
+                   # + TNFS USB port frames (test_tnfs_link)
                    # + root store: generator (test_roots2c.py), lookup (test_roots_store),
                    #   callback against mbedTLS (test_roots_ca_cb, needs PICO_SDK_PATH or MBEDTLS_DIR);
                    #   without mbedTLS that last test is SKIPPED with an explicit message
@@ -201,6 +224,8 @@ src/ap_pico.[ch]      setup access point (cyw43 + lwIP): opening, closing, HTTP
 src/dhcp_server.[ch]  access point DHCP server (portable, tested on the PC)
 src/dns_catchall.[ch] access point captive DNS (portable, tested on the PC)
 src/web_setup.[ch]    setup page: HTTP, form, captive portal (portable, tested on the PC)
+src/tnfs_link.[ch]    TNFS USB port frames and reply queue (portable, tested on the PC)
+src/tnfs_pico.[ch]    TNFS USB port: independent UDP link, non-blocking DNS
 src/tls_date.[ch]     civil date without gmtime_r (certificate date checks)
 src/mbedtls_config.h  mbedTLS configuration (TLS 1.2 client)
 certs/roots.pem       trust roots (Mozilla store); tools/roots2c.py compiles them

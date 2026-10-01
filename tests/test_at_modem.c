@@ -675,6 +675,44 @@ static void test_ap_setup(void)
     send("ATI\r\n"); CHECK_NOT_OUT("setup AP"); clear_out();
 }
 
+/* AT$TNFS : serveur du second port USB (TNFS) ; AT&W */
+static void test_tnfs_config(void)
+{
+    reset_mock();
+    send("ATE0\r\n"); clear_out();
+    CHECK(modem.cfg.tnfs_port == 16384 && modem.cfg.tnfs_host[0] == 0);
+    send("AT$TNFS?\r\n"); CHECK_OUT("$TNFS:\"\",0\r\n"); CHECK_OUT("OK"); clear_out();
+    send("ATI\r\n"); CHECK_OUT("TNFS (USB port 2): off\r\n"); clear_out();
+    int saved = M.saved;
+    send("AT$TNFS=\"tnfs.example\",16385\r\n"); CHECK_OUT("OK"); clear_out();
+    CHECK(M.saved == saved + 1 && !strcmp(M.saved_cfg.tnfs_host, "tnfs.example") && M.saved_cfg.tnfs_port == 16385);
+    send("AT$TNFS?\r\n"); CHECK_OUT("$TNFS:\"tnfs.example\",16385\r\n"); clear_out();
+    send("ATI\r\n"); CHECK_OUT("TNFS (USB port 2): tnfs.example:16385\r\n"); clear_out();
+    send("at$tnfs=192.168.1.10:16384\r\n"); CHECK_OUT("OK"); clear_out();   /* minuscules, hôte:port */
+    CHECK(!strcmp(modem.cfg.tnfs_host, "192.168.1.10") && modem.cfg.tnfs_port == 16384);
+    send("AT$TNFS=\"serveur\"\r\n"); CHECK_OUT("OK"); CHECK(modem.cfg.tnfs_port == 16384); clear_out();
+    send("AT$TNFS=autre\r\n"); CHECK_OUT("OK"); CHECK(!strcmp(modem.cfg.tnfs_host, "autre")); clear_out();
+    /* erreurs : port invalide, hôte vide, reste de ligne, commande inconnue */
+    send("AT$TNFS=h:0\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT$TNFS=h:70000\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT$TNFS=\"\",1\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT$TNFS=h:12x\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT$TNFS=a b\r\n"); CHECK_OUT("ERROR"); clear_out();
+    send("AT$FOO\r\n"); CHECK_OUT("ERROR"); clear_out();
+    CHECK(!strcmp(modem.cfg.tnfs_host, "autre"));
+    /* effacement ; AT&W accepté (rien à faire) */
+    send("AT$TNFS=0\r\n"); CHECK_OUT("OK"); CHECK(modem.cfg.tnfs_host[0] == 0); clear_out();
+    send("AT&W\r\n"); CHECK_OUT("OK"); clear_out();
+    send("AT&X\r\n"); CHECK_OUT("ERROR"); clear_out();
+    /* migration v2 : serveur TNFS vide, port par défaut */
+    struct at_config cfg;
+    at_modem_config_defaults(&cfg);
+    strcpy(cfg.tnfs_host, "x");
+    cfg.magic = AT_CONFIG_MAGIC_V2;
+    at_modem_init(&modem, &ops, &cfg);
+    CHECK(modem.cfg.tnfs_host[0] == 0 && modem.cfg.tnfs_port == 16384);
+}
+
 int main(void)
 {
     test_basic();
@@ -684,6 +722,7 @@ int main(void)
     test_rx_ring();
     test_udp();
     test_ap_setup();
+    test_tnfs_config();
     test_hayes();
     test_tls();
     test_config_persist();

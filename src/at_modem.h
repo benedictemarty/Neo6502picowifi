@@ -73,6 +73,8 @@ struct at_config {
     uint8_t  s0;            /* réponse automatique (sonneries)               */
     uint16_t tls_ports[AT_TLS_PORTS_MAX]; /* AT+TLSPORT : CIPSTART "TCP" → TLS */
     char     ap_pass[AT_PASS_MAX + 1];    /* AT+APSETUPPWD : point d'accès de configuration */
+    char     tnfs_host[AT_HOST_MAX + 1];  /* AT$TNFS : serveur du port USB TNFS ("" = aucun) */
+    uint16_t tnfs_port;
 };
 
 #define AT_CONFIG_MAGIC    0x4E574D33u /* 'NWM3' */

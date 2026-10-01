@@ -1,4 +1,5 @@
-/* usb_descriptors.c — descripteurs USB : périphérique CDC-ACM « Neo6502 Wi-Fi modem ». */
+/* usb_descriptors.c — descripteurs USB : périphérique composite, deux CDC-ACM
+   (IAD) : interfaces 0-1 « Modem AT » (inchangé), interfaces 2-3 « TNFS ». */
 #include "tusb.h"
 #include "pico/unique_id.h"
 
@@ -25,15 +26,19 @@ static const tusb_desc_device_t desc_device = {
 
 const uint8_t *tud_descriptor_device_cb(void) { return (const uint8_t *)&desc_device; }
 
-enum { ITF_NUM_CDC = 0, ITF_NUM_CDC_DATA, ITF_NUM_TOTAL };
-#define EPNUM_CDC_NOTIF 0x81
-#define EPNUM_CDC_OUT   0x02
-#define EPNUM_CDC_IN    0x82
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN)
+enum { ITF_NUM_CDC = 0, ITF_NUM_CDC_DATA, ITF_NUM_TNFS, ITF_NUM_TNFS_DATA, ITF_NUM_TOTAL };
+#define EPNUM_CDC_NOTIF  0x81
+#define EPNUM_CDC_OUT    0x02
+#define EPNUM_CDC_IN     0x82
+#define EPNUM_TNFS_NOTIF 0x83
+#define EPNUM_TNFS_OUT   0x04
+#define EPNUM_TNFS_IN    0x84
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + 2 * TUD_CDC_DESC_LEN)
 
 static const uint8_t desc_configuration[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0, 100),
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64),
+    TUD_CDC_DESCRIPTOR(ITF_NUM_TNFS, 5, EPNUM_TNFS_NOTIF, 8, EPNUM_TNFS_OUT, EPNUM_TNFS_IN, 64),
 };
 
 const uint8_t *tud_descriptor_configuration_cb(uint8_t index)
@@ -47,7 +52,8 @@ static const char *string_desc[] = {
     "Neo6502drive",                  /* 1 : fabricant */
     "Pico W Wi-Fi modem",            /* 2 : produit */
     NULL,                            /* 3 : numéro de série (identifiant flash) */
-    "Modem AT",                      /* 4 : interface CDC */
+    "Modem AT",                      /* 4 : interface CDC 0 */
+    "TNFS",                          /* 5 : interface CDC 1 (tnfs_pico.c) */
 };
 
 static uint16_t desc_str[32];

@@ -71,11 +71,33 @@ en modem Wi-Fi pour le Neo6502 (stories US-T1 et US-T2 de `docs/BACKLOG.md`).
 | `ATI` | identité (`modem X.Y.Z`), ligne `build:` (`git describe` : `vX.Y.Z` pour une release, `vX.Y.Z-N-gSHA[-dirty]` sinon), SSID mémorisé, cause du dernier reset (`power-on`, `AT+RST`, `AT+BOOTSEL (UF2 flash)`, `reboot (bootloader or debugger)`, `watchdog timeout, stage N`, `lwip assert: …`), ligne `TLS:` (pile, nombre de racines, racine retenue au dernier handshake (`last root:`), tas newlib (`heap:` utilisé, pic, max), heure, durée et suite du dernier handshake, `resumed`, drapeaux de vérification, derniers messages lwIP/mbedTLS), `TLS ports:` |
 | `AT+BOOTSEL` | `OK` puis passage en mode UF2 (`RPI-RP2`) sans toucher au bouton — spécifique à ce firmware |
 | `AT+APSETUP=1` / `=0` / `?` | ouvre / ferme le point d'accès de configuration ; `+APSETUP:1,"Neo6502-modem-XXXX"` ou `+APSETUP:0` (voir ci-dessous) |
+| `AT$TNFS="hôte",port` / `=hôte:port` / `=hôte` / `=0` / `?` | serveur TNFS du second port USB (port 16384 par défaut, persistant) ; `$TNFS:"hôte",port` ; `=0` efface ; commande commune avec PicoWiFiModemUSB |
+| `AT&W` | `OK` (la configuration est déjà enregistrée à chaque commande) |
 | `AT+APSETUPPWD="…"` / `?` | mot de passe du point d'accès (8 à 63 caractères ASCII imprimables, persistant) ; défaut `neo6502wifi` |
 
 Non pris en charge (répond `ERROR`) : `CIPMUX=1`, forme UDP à 5 paramètres (port local, mode), `ATO`/`ATA` sur un lien UDP (`NO CARRIER`), mode point d'accès,
 TLS 1.3, certificat client, mode transparent ESP (`CIPMODE=1` ; utiliser
 `ATDT` à la place — `ATDT` fait aussi du TLS vers un port de `AT+TLSPORT`).
+
+## Second port USB : TNFS
+
+Le modem est un périphérique USB composite à **deux ports série** (CDC-ACM, VID:PID
+`2E8A:000A`, produit « Pico W Wi-Fi modem », fabricant « Neo6502drive ») :
+
+| Interfaces | Nom | Rôle | Linux |
+|---|---|---|---|
+| 0-1 | `Modem AT` | modem AT/Hayes (inchangé) | `/dev/ttyACM0` |
+| 2-3 | `TNFS` | relais TNFS (UDP) | `/dev/ttyACM1` |
+
+Sur le port TNFS, dans les deux sens, une trame = **longueur sur 2 octets
+petit-boutiste** puis le **datagramme** (1 à 1472 octets) ; une longueur invalide vide
+le tampon d'entrée (resynchronisation). Chaque trame part en un datagramme UDP vers le
+serveur `AT$TNFS` (DNS résolu sans bloquer au premier datagramme), chaque réponse revient
+en une trame. Ce lien UDP est **indépendant du lien AT** : une session Minitel/Telnet
+(`ATDT`, `CIPSTART`) et TNFS fonctionnent en même temps. Sans Wi-Fi, sans serveur, pendant
+la résolution DNS, ou port TNFS fermé (DTR) : rien n'est renvoyé, le client TNFS gère ses
+délais. Format convenu avec reload-emulator et Neo6502TeleStrat (client
+`src/devices/neo_tnfs.h` de reload). Pas de TNFS sur l'UART.
 
 ## Configuration du Wi-Fi depuis un téléphone
 
@@ -169,6 +191,7 @@ défaut = valeur de `netsetup.pas`).
 ```
 make -C tests      # cœur du modem (test_at_modem) + dates TLS (test_tls_date) sur PC, gcc + ASan/UBSan
                    # + point d'accès de configuration : DHCP et DNS captif (test_dhcp_server), page (test_web_setup)
+                   # + trames du port USB TNFS (test_tnfs_link)
                    # + magasin de racines : générateur (test_roots2c.py), recherche (test_roots_store),
                    #   rappel contre mbedTLS (test_roots_ca_cb, exige PICO_SDK_PATH ou MBEDTLS_DIR)
 ```
@@ -200,6 +223,8 @@ src/ap_pico.[ch]      point d'accès de configuration (cyw43 + lwIP) : ouverture
 src/dhcp_server.[ch]  serveur DHCP du point d'accès (portable, testé sur PC)
 src/dns_catchall.[ch] DNS captif du point d'accès (portable, testé sur PC)
 src/web_setup.[ch]    page de configuration : HTTP, formulaire, portail captif (portable, testé sur PC)
+src/tnfs_link.[ch]    trames du port USB TNFS et file des réponses (portable, testé sur PC)
+src/tnfs_pico.[ch]    port USB TNFS : lien UDP indépendant, DNS non bloquant
 src/tls_date.[ch]     date civile sans gmtime_r (vérification des dates de certificats)
 src/mbedtls_config.h  configuration mbedTLS (client TLS 1.2)
 certs/roots.pem       racines de confiance (magasin Mozilla) ; tools/roots2c.py les compile

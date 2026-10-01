@@ -1,4 +1,4 @@
-/* tusb_config.h — TinyUSB device : une interface CDC-ACM. */
+/* tusb_config.h — TinyUSB device : deux interfaces CDC-ACM (0 = modem AT, 1 = TNFS). */
 #ifndef TUSB_CONFIG_H
 #define TUSB_CONFIG_H
 
@@ -8,7 +8,7 @@
 #define CFG_TUD_ENABLED         1
 #define CFG_TUD_ENDPOINT0_SIZE  64
 
-#define CFG_TUD_CDC             1
+#define CFG_TUD_CDC             2
 #define CFG_TUD_MSC             0
 #define CFG_TUD_HID             0
 #define CFG_TUD_MIDI            0

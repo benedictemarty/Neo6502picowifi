@@ -160,6 +160,7 @@ void at_modem_config_defaults(struct at_config *cfg)
     cfg->sntp_tz = 0;
     strcpy(cfg->sntp_server, "pool.ntp.org");
     strcpy(cfg->ap_pass, AT_AP_PASS_DEFAULT);
+    cfg->tnfs_port = 16384;
 }
 
 static bool has_tls(struct at_modem *m)
@@ -199,12 +200,16 @@ void at_modem_init(struct at_modem *m, const struct at_modem_ops *ops,
         m->cfg = *cfg;
         m->cfg.ap_pass[AT_PASS_MAX] = 0;
         if (!ap_pass_valid(m->cfg.ap_pass)) strcpy(m->cfg.ap_pass, AT_AP_PASS_DEFAULT);
+        m->cfg.tnfs_host[AT_HOST_MAX] = 0;
+        if (!m->cfg.tnfs_port) m->cfg.tnfs_port = 16384;
     } else if (cfg && (cfg->magic == AT_CONFIG_MAGIC_V2 || cfg->magic == AT_CONFIG_MAGIC_V1)) {
         /* migration v1/v2 → v3 : les champs ajoutés prennent leur valeur par
            défaut (tls_ports à zéro en v1, ap_pass) ; le reste est conservé */
         m->cfg = *cfg;
         if (cfg->magic == AT_CONFIG_MAGIC_V1) memset(m->cfg.tls_ports, 0, sizeof m->cfg.tls_ports);
         strcpy(m->cfg.ap_pass, AT_AP_PASS_DEFAULT);
+        memset(m->cfg.tnfs_host, 0, sizeof m->cfg.tnfs_host);
+        m->cfg.tnfs_port = 16384;
         m->cfg.magic = AT_CONFIG_MAGIC;
     } else {
         at_modem_config_defaults(&m->cfg);
@@ -340,6 +345,8 @@ static bool hayes(struct at_modem *m, const char *cmd)
             if (ap) outf(m, "setup AP: \"%s\", password \"%s\", http://192.168.4.1/\r\n", ap, m->cfg.ap_pass);
             else out(m, "setup AP: off\r\n");
         }
+        if (m->cfg.tnfs_host[0]) outf(m, "TNFS (USB port 2): %s:%u\r\n", m->cfg.tnfs_host, m->cfg.tnfs_port);
+        else out(m, "TNFS (USB port 2): off\r\n");
         if (has_tls(m)) {
             out(m, m->ops->tls_info(m->ops->ctx));   /* peut dépasser le tampon d'outf */
             out(m, "\r\n");
@@ -350,6 +357,10 @@ static bool hayes(struct at_modem *m, const char *cmd)
         }
         ok(m);
         return true;
+    case '&':
+        /* AT&W : la configuration est déjà enregistrée à chaque commande */
+        if (toupper((unsigned char)*arg) == 'W') { ok(m); return true; }
+        return false;
     case 'S': {
         const char *p = arg;
         long reg;
@@ -629,6 +640,48 @@ static void plus_command(struct at_modem *m, const char *cmd)
 
 /* ------------------------------------------------------- ligne AT */
 
+/* AT$TNFS : serveur du second port USB (TNFS), commun avec PicoWiFiModemUSB.
+   AT$TNFS="hôte",port | AT$TNFS=hôte:port | AT$TNFS=hôte (port 16384)
+   AT$TNFS=0 (efface) | AT$TNFS? → $TNFS:"hôte",port. Persistant. */
+static void dollar_command(struct at_modem *m, const char *cmd)
+{
+    const char *p;
+    char host[AT_HOST_MAX + 1];
+    long port = 16384;
+    if (!strcmp(cmd, "TNFS?")) {
+        if (m->cfg.tnfs_host[0]) outf(m, "$TNFS:\"%s\",%u\r\n", m->cfg.tnfs_host, m->cfg.tnfs_port);
+        else out(m, "$TNFS:\"\",0\r\n");
+        ok(m);
+        return;
+    }
+    if (!starts(cmd, "TNFS=", &p)) { error(m); return; }
+    while (*p == ' ') p++;
+    if (!strcmp(p, "0")) {
+        m->cfg.tnfs_host[0] = 0;
+        m->cfg.tnfs_port = 16384;
+        save(m);
+        ok(m);
+        return;
+    }
+    if (*p == '"') {
+        if (!parse_quoted(&p, host, sizeof host)) { error(m); return; }
+        if (skip_comma(&p) && !parse_int(&p, &port)) { error(m); return; }
+    } else {
+        const char *sep = strchr(p, ':');
+        size_t hl = sep ? (size_t)(sep - p) : strlen(p);
+        if (hl > AT_HOST_MAX) { error(m); return; }
+        copy_str(host, sizeof host, p, hl);
+        if (sep) { p = sep + 1; if (!parse_int(&p, &port)) { error(m); return; } }
+        else p += hl;
+    }
+    while (*p == ' ') p++;
+    if (!host[0] || strchr(host, ' ') || *p || port < 1 || port > 65535) { error(m); return; }
+    strcpy(m->cfg.tnfs_host, host);
+    m->cfg.tnfs_port = (uint16_t)port;
+    save(m);
+    ok(m);
+}
+
 static void process_line(struct at_modem *m)
 {
     char *line = m->line;
@@ -648,6 +701,13 @@ static void process_line(struct at_modem *m)
         for (; s[i] && s[i] != '=' && s[i] != '?'; i++) up[i] = (char)toupper((unsigned char)s[i]);
         strcpy(up + i, s + i);
         plus_command(m, up);
+    } else if (*cmd == '$') {
+        char up[AT_LINE_MAX];
+        size_t i = 0;
+        const char *s = cmd + 1;
+        for (; s[i] && s[i] != '=' && s[i] != '?'; i++) up[i] = (char)toupper((unsigned char)s[i]);
+        strcpy(up + i, s + i);
+        dollar_command(m, up);
     } else if (!hayes(m, cmd)) {
         error(m);
     }
